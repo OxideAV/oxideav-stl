@@ -116,8 +116,23 @@ let (unique, dedup_map) = StlEncoder::unique_vertices_with_tolerance(&scene, 1.0
 
 `eps == 0.0` (or any negative / non-finite value) is clamped to the
 bit-exact path. The scan is `O(N · K)` where `K` is the running
-canonical count — fine for diagnostic use; large-mesh callers should
-spatially index upstream.
+canonical count — fine for diagnostic use; large-mesh callers
+should reach for the spatial-index variant:
+
+```text
+let s = EncodeStats::with_tolerance_spatial(&scene, 1.0e-5);
+let (unique, dedup_map) =
+    StlEncoder::unique_vertices_with_tolerance_spatial(&scene, 1.0e-5);
+```
+
+The spatial path bins each vertex into a uniform-grid cell of side
+`eps × 2` and scans the 27 surrounding cells, amortising to `O(N)`
+for typical geometry. With `eps == 0.0` it short-circuits to the
+bit-exact branch and produces results identical to the brute-force
+path; for `eps > 0` it is approximate by design — every two points
+it merges are within `eps` on every axis under the Chebyshev
+metric, but it may emit one additional canonical when borderline
+points fall into non-adjacent cells.
 
 ## Auto-inject `stl:unique_vertex_count`
 
@@ -215,18 +230,14 @@ back to `oxideav_mesh3d`'s crate-local enum.
 
 With the `trace` Cargo feature enabled and `OXIDEAV_STL_TRACE_FILE`
 pointing at a writable path, the codec emits one JSON-Lines event per
-state transition (header / triangle_count / triangle / done). The
-field schema, ordering invariants, and worked example are documented
-in `docs/trace-contract.md`; cross-implementation auditors can
-lockstep against that schema without reading source.
-
-## Round 5 candidates
-
-- Vertex-share-stats trace events (so the `trace` tape carries the
-  same diagnostic signal that `EncodeStats` does).
-- ASCII-mode auto-inject hook parity (currently `apply_pre_encode_extras`
-  is format-agnostic — exercise it through the ASCII path explicitly
-  in tests).
+state transition. **Decode** tapes carry header / triangle_count /
+triangle / done; **encode** tapes additionally carry a
+`share_stats` event between the final `triangle` and `done` so a
+JSONL auditor can pick up the bit-exact `EncodeStats` summary
+natively without re-walking the geometry. The field schema, ordering
+invariants, and worked examples are documented in
+`docs/trace-contract.md`; cross-implementation auditors can lockstep
+against that schema without reading source.
 
 ## License
 

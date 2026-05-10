@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 5 — README refresh.
+  - Documents `with_tolerance_spatial` /
+    `unique_vertices_with_tolerance_spatial` alongside the
+    brute-force tolerance section so the spatial path is the
+    obvious choice for large-mesh callers.
+  - Refreshes the trace-tape paragraph to mention the encoder-only
+    `share_stats` event and the decode-vs-encode tape distinction.
+  - Drops the round-4 "Round 5 candidates" section now that those
+    items have landed.
+
 - Round 5 — spatial-grid variant of the tolerance dedup helper.
   - New `EncodeStats::with_tolerance_spatial(scene, eps)` +
     `StlEncoder::unique_vertices_with_tolerance_spatial(scene, eps)`.
