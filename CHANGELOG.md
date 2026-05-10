@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 5 — ASCII-mode parity test for `apply_pre_encode_extras`.
+  - New `tests/ascii_apply_pre_encode_extras.rs` mirrors the
+    round-4 binary suite against `StlEncoder::new_ascii`. The hook
+    is format-agnostic by design (`apply_pre_encode_extras` mutates
+    the scene independently of the eventual emit format), but the
+    pre-existing tests only exercised it through the binary
+    encoder; the parity suite locks in the format-agnostic
+    contract so a future refactor that accidentally makes the
+    hook format-aware fails loudest.
+  - Includes a direct same-scene-different-encoder-format
+    parity assertion (the byte-for-byte equivalent of "the hook
+    leaves the scene in identical states regardless of which
+    StlEncoder produced it").
+
 - Round 5 — `share_stats` JSONL trace event (encoder-only).
   - With `--features trace` ON and a trace path configured, both the
     binary and ASCII encoders now emit a single `share_stats` event
