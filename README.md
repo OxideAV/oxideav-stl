@@ -98,6 +98,27 @@ println!("share factor = {:.2}", s.share_factor());
 
 Unique-vertex matching uses exact `f32` bit-pattern comparison.
 
+For meshes whose corners differ by floating-point noise (CAD/scanner
+pipelines often emit positions that vary by ~1e-6 between "the same"
+logical vertex), a tolerance-based view is also available:
+
+```text
+use oxideav_stl::{EncodeStats, StlEncoder};
+
+// `with_tolerance` only changes `unique_vertices`; `triangles` and
+// `emitted_vertices` come straight from the bit-exact path.
+let s = EncodeStats::with_tolerance(&scene, 1.0e-5);
+
+// `(unique_count, dedup_map)` — `dedup_map[i]` is the canonical-slot
+// index assigned to the i-th *emitted* vertex, in encoder order.
+let (unique, dedup_map) = StlEncoder::unique_vertices_with_tolerance(&scene, 1.0e-5);
+```
+
+`eps == 0.0` (or any negative / non-finite value) is clamped to the
+bit-exact path. The scan is `O(N · K)` where `K` is the running
+canonical count — fine for diagnostic use; large-mesh callers should
+spatially index upstream.
+
 ## 16-bit per-face colour
 
 The binary STL `uint16` attribute slot (spec-defined as zero) is

@@ -50,6 +50,31 @@ impl EncodeStats {
             (self.emitted_vertices as f32) / (self.unique_vertices as f32)
         }
     }
+
+    /// Build an [`EncodeStats`] for `scene` using a *tolerance-based*
+    /// definition of vertex uniqueness in place of the bit-exact one
+    /// used by [`StlEncoder::stats`].
+    ///
+    /// Two emitted vertices `a` and `b` are treated as equal when the
+    /// component-wise absolute distance is at most `eps` on each of
+    /// the three axes (i.e. `|a.x - b.x| ≤ eps && |a.y - b.y| ≤ eps
+    /// && |a.z - b.z| ≤ eps`). With `eps == 0.0` the comparison
+    /// degenerates to bit-exact equality on finite values — this is
+    /// the lossless path and matches [`StlEncoder::stats`] for any
+    /// scene whose positions are finite.
+    ///
+    /// `triangles` and `emitted_vertices` are unchanged from the
+    /// bit-exact path; only `unique_vertices` reflects the tolerance.
+    /// Negative or non-finite `eps` is clamped to `0.0`.
+    pub fn with_tolerance(scene: &Scene3D, eps: f32) -> Self {
+        let bit_exact = compute_stats(scene);
+        let (unique_vertices, _) = unique_vertices_with_tolerance(scene, eps);
+        Self {
+            triangles: bit_exact.triangles,
+            emitted_vertices: bit_exact.emitted_vertices,
+            unique_vertices,
+        }
+    }
 }
 
 // (No auto-injected extras key for unique-vertex count — the encode
@@ -128,6 +153,27 @@ impl StlEncoder {
     pub fn stats(scene: &Scene3D) -> EncodeStats {
         compute_stats(scene)
     }
+
+    /// Tolerance-based variant of the unique-vertex scan. Returns the
+    /// number of distinct logical vertices under the `eps` rule plus a
+    /// `dedup_map` whose `i`-th entry is the canonical-vertex slot
+    /// assigned to the `i`-th *emitted* vertex (i.e. one entry per
+    /// `emitted_vertices` slot in [`EncodeStats`]).
+    ///
+    /// Two emitted vertices are merged when each component-wise
+    /// absolute distance is at most `eps`. With `eps == 0.0` the
+    /// scan reduces to bit-exact equality on finite values (preserving
+    /// the well-defined NaN behaviour of [`StlEncoder::stats`]).
+    /// Negative / non-finite `eps` is clamped to `0.0`.
+    ///
+    /// Algorithmic note — this is an `O(N · K)` scan where `K` is the
+    /// running canonical-vertex count, which is fine for diagnostic
+    /// use on sub-100k-vertex scenes. Geometry-heavy callers should
+    /// run a spatial index (kd-tree / hash grid) themselves and feed
+    /// already-deduplicated positions through the bit-exact path.
+    pub fn unique_vertices_with_tolerance(scene: &Scene3D, eps: f32) -> (usize, Vec<usize>) {
+        unique_vertices_with_tolerance(scene, eps)
+    }
 }
 
 /// Walk every `Triangles` primitive in `scene` and compute the
@@ -189,6 +235,126 @@ pub(crate) fn compute_stats(scene: &Scene3D) -> EncodeStats {
         triangles,
         emitted_vertices: emitted,
         unique_vertices: unique.len(),
+    }
+}
+
+/// Tolerance-based unique-vertex scan + dedup map.
+///
+/// Walks every `Triangles` primitive in scene-graph / encoder order and
+/// builds, for each emitted vertex, a canonical-slot index. Two emitted
+/// vertices are mapped to the same slot when their three component
+/// distances are all `≤ eps`. With `eps == 0.0` the scan degenerates
+/// to bit-exact equality on finite values (matching the well-defined
+/// NaN handling of [`compute_stats`]).
+///
+/// Returns `(unique_count, dedup_map)` where `dedup_map.len() ==
+/// emitted_vertices` (the [`EncodeStats::emitted_vertices`] count).
+pub(crate) fn unique_vertices_with_tolerance(scene: &Scene3D, eps: f32) -> (usize, Vec<usize>) {
+    // Negative or non-finite eps: clamp to bit-exact behaviour rather
+    // than panicking. Tolerance dedup is a diagnostic helper; refusing
+    // garbage-eps inputs would push policy into the caller without
+    // meaningfully widening the API contract.
+    let eps = if eps.is_finite() && eps >= 0.0 {
+        eps
+    } else {
+        0.0
+    };
+
+    // Pre-allocate using the bit-exact emitted-vertex count so we
+    // never re-grow the dedup_map mid-scan.
+    let bit_exact = compute_stats(scene);
+    let mut dedup_map: Vec<usize> = Vec::with_capacity(bit_exact.emitted_vertices);
+
+    if eps == 0.0 {
+        // Fast path — group emitted vertices by exact f32 bit pattern,
+        // exactly the same definition `compute_stats` uses for
+        // `unique_vertices`. Avoids the O(K) scan and gives us the
+        // canonical "tolerance == 0 ⇔ bit-exact" guarantee that the
+        // [`EncodeStats::with_tolerance`] doc promises.
+        use std::collections::HashMap;
+        let mut by_bits: HashMap<(u32, u32, u32), usize> = HashMap::new();
+        for_each_emitted_vertex(scene, |p| {
+            let key = (p[0].to_bits(), p[1].to_bits(), p[2].to_bits());
+            let next = by_bits.len();
+            let slot = *by_bits.entry(key).or_insert(next);
+            dedup_map.push(slot);
+        });
+        return (by_bits.len(), dedup_map);
+    }
+
+    // Slow path — O(N · K). Maintain a list of canonical positions
+    // and, for each emitted vertex, scan it linearly to find the first
+    // canonical within tolerance. With K small (real-world geometry
+    // tends to have far fewer unique corners than emitted slots) this
+    // amortises tolerably; on pathological all-distinct inputs it
+    // degrades to O(N²) but the caller asked for a brute-force
+    // tolerance scan and gets one. Spatial indexing belongs to
+    // higher-layer mesh tooling, not the STL codec.
+    let mut canonicals: Vec<[f32; 3]> = Vec::new();
+    for_each_emitted_vertex(scene, |p| {
+        let mut found: Option<usize> = None;
+        for (i, c) in canonicals.iter().enumerate() {
+            // Component-wise absolute distance ≤ eps on each axis.
+            // Non-finite components compare as not-within-tolerance
+            // (NaN propagation: any subtraction with NaN ⇒ NaN ⇒
+            // any comparison ⇒ false), so each NaN takes its own
+            // slot — same effective contract as the bit-exact path.
+            if (p[0] - c[0]).abs() <= eps
+                && (p[1] - c[1]).abs() <= eps
+                && (p[2] - c[2]).abs() <= eps
+            {
+                found = Some(i);
+                break;
+            }
+        }
+        match found {
+            Some(i) => dedup_map.push(i),
+            None => {
+                let new_slot = canonicals.len();
+                canonicals.push(p);
+                dedup_map.push(new_slot);
+            }
+        }
+    });
+    (canonicals.len(), dedup_map)
+}
+
+/// Walk every emitted vertex (post-index-buffer-resolution) of the
+/// triangle stream that the encoder would write, in encoder order, and
+/// pass it to `f`. Mirrors the iteration scheme of [`compute_stats`]
+/// so all unique-vertex helpers see the same vertex sequence.
+fn for_each_emitted_vertex(scene: &Scene3D, mut f: impl FnMut([f32; 3])) {
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            for face_idx in 0..face_count {
+                let (vi0, vi1, vi2) = match &prim.indices {
+                    Some(oxideav_mesh3d::Indices::U16(v)) => {
+                        let b = face_idx * 3;
+                        (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+                    }
+                    Some(oxideav_mesh3d::Indices::U32(v)) => {
+                        let b = face_idx * 3;
+                        (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+                    }
+                    None => {
+                        let b = face_idx * 3;
+                        (b, b + 1, b + 2)
+                    }
+                };
+                for &vi in &[vi0, vi1, vi2] {
+                    if let Some(p) = prim.positions.get(vi) {
+                        f(*p);
+                    }
+                }
+            }
+        }
     }
 }
 

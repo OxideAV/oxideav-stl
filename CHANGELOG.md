@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 4 — tolerance-based vertex dedup helpers.
+  - New `EncodeStats::with_tolerance(&scene, eps)` builds an
+    `EncodeStats` whose `unique_vertices` field reflects ε-equality
+    instead of bit-exact `f32` matching. `triangles` and
+    `emitted_vertices` come straight from the bit-exact path so the
+    return shape is interchangeable.
+  - New `StlEncoder::unique_vertices_with_tolerance(&scene, eps)`
+    returns `(unique_count, dedup_map)`; `dedup_map[i]` is the
+    canonical-slot index assigned to the `i`-th emitted vertex (in
+    encoder order, post-index-buffer resolution).
+  - Two emitted vertices are merged when each component-wise absolute
+    distance is `≤ eps`. `eps == 0.0` (and any negative / non-finite
+    value, clamped to zero) reduces the scan to bit-exact f32 equality
+    on finite values, matching `StlEncoder::stats`.
+  - The bit-exact path (`StlEncoder::stats`) is unchanged. Tolerance
+    dedup is `O(N · K)` and intended for diagnostic / pipeline-stats
+    use; large-mesh callers should spatial-index upstream.
+
 - Round 3 — multi-`solid` ASCII parsing + per-mesh emit.
   - The decoder now accepts back-to-back `solid NAME … endsolid NAME`
     blocks (older Pro/E + AutoCAD ASCII exporters concatenate
