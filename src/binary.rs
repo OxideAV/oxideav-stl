@@ -40,6 +40,15 @@ pub(crate) const DEFAULT_HEADER: &[u8; 80] =
 /// Extras key under which per-face attribute bytes round-trip.
 pub(crate) const PER_FACE_ATTRS_KEY: &str = "stl:per_face_attributes";
 
+/// Extras key under which the auto-detected (or caller-supplied)
+/// 16-bit per-face colour convention is recorded — `"viscam"` or
+/// `"materialise"`. Set on decode whenever
+/// [`crate::color::detect`] picks a confident value; the encoder
+/// round-trips the raw byte payload through `stl:per_face_attributes`
+/// regardless, so this key is metadata for downstream renderers that
+/// want to interpret the bytes.
+pub(crate) const COLOR_CONVENTION_KEY: &str = "stl:color_convention";
+
 /// Parse a binary STL byte slice into a [`Scene3D`].
 pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     if bytes.len() < HEADER_BYTES {
@@ -143,6 +152,17 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
             PER_FACE_ATTRS_KEY.to_string(),
             serde_json::Value::String(hex_encode(&attr_bytes)),
         );
+        // 16-bit per-face colour heuristic (Materialise vs VisCAM).
+        // Only record when the detector is confident; if it returns
+        // `None` the caller still has the raw bytes via
+        // `stl:per_face_attributes` and can pick a convention
+        // explicitly.
+        if let Some(convention) = crate::color::detect(&attr_bytes) {
+            mesh_extras.insert(
+                COLOR_CONVENTION_KEY.to_string(),
+                serde_json::Value::String(convention.as_str().to_string()),
+            );
+        }
     }
     // Parser symmetry — primitives don't carry the per-face attrs;
     // the mesh-level extras is the round-trip channel.

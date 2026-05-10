@@ -39,11 +39,13 @@
 
 pub mod ascii;
 pub mod binary;
+pub mod color;
 pub mod decoder;
 pub mod encoder;
 #[cfg(feature = "trace")]
 pub mod trace;
 
+pub use color::{detect as detect_color_convention, ColorConvention, Stl16BitColor};
 pub use decoder::StlDecoder;
 pub use encoder::StlEncoder;
 

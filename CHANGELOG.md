@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 2 — 16-bit per-face colour extension support.
+  - New `oxideav_stl::color` module with `ColorConvention`
+    (`ViscamSolidView` / `Materialise`) + `Stl16BitColor` (5+5+5+1
+    valid bit) + `detect()` heuristic.
+  - VisCAM/SolidView layout: `[valid:1][R:5][G:5][B:5]` with
+    `valid=1` meaning live; Materialise layout:
+    `[valid:1][B:5][G:5][R:5]` with `valid=0` meaning live (channel
+    order AND valid-bit polarity differ).
+  - Decoder calls `color::detect` against the per-face attribute
+    population and surfaces the result on
+    `Primitive::extras["stl:color_convention"]` as `"viscam"` /
+    `"materialise"` whenever the bit-15 distribution is unambiguous;
+    raw bytes still round-trip via `stl:per_face_attributes`.
+  - `Stl16BitColor::r8/g8/b8` upscale 5-bit channels to 8-bit using
+    bit-replication (`(c << 3) | (c >> 2)`) so 0x1F → 0xFF.
+  - `ColorConvention` implements `std::str::FromStr` for round-trip
+    through the extras tag.
+
 - Round 2 — JSON-Lines trace emitter (`trace` Cargo feature).
   - With `--features trace` AND `OXIDEAV_STL_TRACE_FILE=<path>`, the
     parser/serialiser writes one JSONL event per state transition:
