@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 2 — JSON-Lines trace emitter (`trace` Cargo feature).
+  - With `--features trace` AND `OXIDEAV_STL_TRACE_FILE=<path>`, the
+    parser/serialiser writes one JSONL event per state transition:
+    `header` (one), `triangle_count` (one), `triangle` (one per
+    triangle, in input order), `done` (one). ASCII vs binary trace
+    tapes carry distinct fields (`format`, `name`, `attribute_bytes`,
+    `header_hex`) so a `jq -c .` line-diff against another impl is
+    character-equal where the underlying bytes are.
+  - With the feature OFF the module compiles to nothing; release
+    build pays zero cost. With the feature ON but the env var unset,
+    every emit becomes a single `Option::is_some` check.
+  - Test-only `trace::set_thread_trace_path` lets parallel tests pin
+    a per-thread tape rather than racing on the env var.
+
 - Round 2 — fuzz-resistant ASCII-vs-binary detection.
   - Optional UTF-8 BOM is stripped before sniffing the prefix.
   - Leading ASCII whitespace (spaces, tabs, CR, LF) is also stripped

@@ -51,6 +51,21 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     let header = &bytes[..80];
     let triangle_count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
 
+    #[cfg(feature = "trace")]
+    let tracer = crate::trace::Tracer::from_env();
+    #[cfg(feature = "trace")]
+    if let Some(t) = tracer.as_ref() {
+        t.emit(crate::trace::Event::Header {
+            format: crate::trace::Format::Binary,
+            byte_len: bytes.len(),
+            header_hex: Some(header),
+            name: None,
+        });
+        t.emit(crate::trace::Event::TriangleCount {
+            count: triangle_count,
+        });
+    }
+
     let body_len = triangle_count
         .checked_mul(TRIANGLE_BYTES)
         .ok_or_else(|| Error::InvalidData("binary STL triangle_count overflow".into()))?;
@@ -72,6 +87,8 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     let mut any_nonzero_attr = false;
 
     let mut cursor = HEADER_BYTES;
+    #[cfg(feature = "trace")]
+    let mut tri_index: usize = 0;
     for _ in 0..triangle_count {
         let n = read_vec3(&bytes[cursor..cursor + 12]);
         let v0 = read_vec3(&bytes[cursor + 12..cursor + 24]);
@@ -82,6 +99,18 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
         if attr_lo != 0 || attr_hi != 0 {
             any_nonzero_attr = true;
         }
+        #[cfg(feature = "trace")]
+        if let Some(t) = tracer.as_ref() {
+            t.emit(crate::trace::Event::Triangle {
+                index: tri_index,
+                normal: n,
+                v0,
+                v1,
+                v2,
+                attribute_bytes: Some([attr_lo, attr_hi]),
+            });
+            tri_index += 1;
+        }
         positions.push(v0);
         positions.push(v1);
         positions.push(v2);
@@ -91,6 +120,14 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
         attr_bytes.push(attr_lo);
         attr_bytes.push(attr_hi);
         cursor += TRIANGLE_BYTES;
+    }
+
+    #[cfg(feature = "trace")]
+    if let Some(t) = tracer.as_ref() {
+        t.emit(crate::trace::Event::Done {
+            source: crate::trace::Format::Binary,
+            triangles_emitted: triangle_count,
+        });
     }
 
     // The `<name>` after `solid` lives in the binary header — vendors
@@ -238,13 +275,50 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
         .map_err(|_| Error::InvalidData("STL triangle count exceeds u32::MAX".into()))?;
     out.extend_from_slice(&count.to_le_bytes());
 
+    #[cfg(feature = "trace")]
+    let tracer = crate::trace::Tracer::from_env();
+    #[cfg(feature = "trace")]
+    if let Some(t) = tracer.as_ref() {
+        t.emit(crate::trace::Event::Header {
+            format: crate::trace::Format::Binary,
+            byte_len: HEADER_BYTES + triangles.len() * TRIANGLE_BYTES,
+            header_hex: Some(DEFAULT_HEADER),
+            name: None,
+        });
+        t.emit(crate::trace::Event::TriangleCount {
+            count: triangles.len(),
+        });
+    }
+
+    #[cfg(feature = "trace")]
+    let mut tri_index: usize = 0;
     for ((n, v0, v1, v2), (lo, hi)) in triangles.iter().zip(attr_pairs.iter()) {
+        #[cfg(feature = "trace")]
+        if let Some(t) = tracer.as_ref() {
+            t.emit(crate::trace::Event::Triangle {
+                index: tri_index,
+                normal: *n,
+                v0: *v0,
+                v1: *v1,
+                v2: *v2,
+                attribute_bytes: Some([*lo, *hi]),
+            });
+            tri_index += 1;
+        }
         write_vec3(&mut out, *n);
         write_vec3(&mut out, *v0);
         write_vec3(&mut out, *v1);
         write_vec3(&mut out, *v2);
         out.push(*lo);
         out.push(*hi);
+    }
+
+    #[cfg(feature = "trace")]
+    if let Some(t) = tracer.as_ref() {
+        t.emit(crate::trace::Event::Done {
+            source: crate::trace::Format::Binary,
+            triangles_emitted: triangles.len(),
+        });
     }
 
     Ok(out)

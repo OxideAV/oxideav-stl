@@ -45,8 +45,24 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     p.expect_keyword("solid")?;
     let name = p.read_optional_line_remainder();
 
+    #[cfg(feature = "trace")]
+    let tracer = crate::trace::Tracer::from_env();
+    #[cfg(feature = "trace")]
+    if let Some(t) = tracer.as_ref() {
+        t.emit(crate::trace::Event::Header {
+            format: crate::trace::Format::Ascii,
+            byte_len: bytes.len(),
+            header_hex: None,
+            name: name.as_deref(),
+        });
+    }
+
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
+    // `tri_index` drives the trace-event `index` field; only counted
+    // when the trace feature is on.
+    #[cfg(feature = "trace")]
+    let mut tri_index: usize = 0;
 
     loop {
         p.skip_ws();
@@ -67,18 +83,54 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
         p.skip_ws();
         p.expect_keyword("loop")?;
 
-        for _ in 0..3 {
-            p.skip_ws();
-            p.expect_keyword("vertex")?;
-            let v = [p.read_float()?, p.read_float()?, p.read_float()?];
-            positions.push(v);
-            normals.push(n);
+        // Read three vertices in source order. We capture them into
+        // local bindings (rather than only `positions.push`) so the
+        // trace emitter can see them.
+        p.skip_ws();
+        p.expect_keyword("vertex")?;
+        let v0 = [p.read_float()?, p.read_float()?, p.read_float()?];
+        p.skip_ws();
+        p.expect_keyword("vertex")?;
+        let v1 = [p.read_float()?, p.read_float()?, p.read_float()?];
+        p.skip_ws();
+        p.expect_keyword("vertex")?;
+        let v2 = [p.read_float()?, p.read_float()?, p.read_float()?];
+        positions.push(v0);
+        normals.push(n);
+        positions.push(v1);
+        normals.push(n);
+        positions.push(v2);
+        normals.push(n);
+
+        #[cfg(feature = "trace")]
+        if let Some(t) = tracer.as_ref() {
+            t.emit(crate::trace::Event::Triangle {
+                index: tri_index,
+                normal: n,
+                v0,
+                v1,
+                v2,
+                attribute_bytes: None,
+            });
+        }
+        #[cfg(feature = "trace")]
+        {
+            tri_index += 1;
         }
 
         p.skip_ws();
         p.expect_keyword("endloop")?;
         p.skip_ws();
         p.expect_keyword("endfacet")?;
+    }
+
+    #[cfg(feature = "trace")]
+    if let Some(t) = tracer.as_ref() {
+        t.emit(crate::trace::Event::TriangleCount { count: tri_index });
+        t.emit(crate::trace::Event::Done {
+            source: crate::trace::Format::Ascii,
+            triangles_emitted: tri_index,
+        });
     }
 
     let mut prim_extras: HashMap<String, serde_json::Value> = HashMap::new();
@@ -135,6 +187,20 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
         let _ = writeln!(out, "solid {name}");
     }
 
+    #[cfg(feature = "trace")]
+    let tracer = crate::trace::Tracer::from_env();
+    #[cfg(feature = "trace")]
+    if let Some(t) = tracer.as_ref() {
+        t.emit(crate::trace::Event::Header {
+            format: crate::trace::Format::Ascii,
+            byte_len: 0, // unknown until done — emitter reads `out.len()` at end
+            header_hex: None,
+            name: if name.is_empty() { None } else { Some(name) },
+        });
+    }
+    #[cfg(feature = "trace")]
+    let mut tri_index: usize = 0;
+
     for mesh in &scene.meshes {
         for prim in &mesh.primitives {
             if prim.topology != Topology::Triangles {
@@ -169,6 +235,23 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
                     Some(ns) if ns.len() == prim.positions.len() => ns[vi0],
                     _ => face_normal(v0, v1, v2),
                 };
+
+                #[cfg(feature = "trace")]
+                if let Some(t) = tracer.as_ref() {
+                    t.emit(crate::trace::Event::Triangle {
+                        index: tri_index,
+                        normal: n,
+                        v0,
+                        v1,
+                        v2,
+                        attribute_bytes: None,
+                    });
+                }
+                #[cfg(feature = "trace")]
+                {
+                    tri_index += 1;
+                }
+
                 let _ = writeln!(
                     out,
                     "  facet normal {} {} {}",
@@ -208,6 +291,15 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
         out.push_str("endsolid\n");
     } else {
         let _ = writeln!(out, "endsolid {name}");
+    }
+
+    #[cfg(feature = "trace")]
+    if let Some(t) = tracer.as_ref() {
+        t.emit(crate::trace::Event::TriangleCount { count: tri_index });
+        t.emit(crate::trace::Event::Done {
+            source: crate::trace::Format::Ascii,
+            triangles_emitted: tri_index,
+        });
     }
 
     Ok(out.into_bytes())

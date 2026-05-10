@@ -23,6 +23,13 @@ default = ["registry"]
 # itself follows the same standalone-friendly pattern).
 registry = ["dep:oxideav-core", "oxideav-mesh3d/registry"]
 
+# `trace` enables the JSON-Lines trace tape used by the cross-impl
+# lockstep audit. With the feature ON and `OXIDEAV_STL_TRACE_FILE` set
+# to a writable path, the parser/serialiser writes one JSONL event
+# per state transition. With the feature OFF, every emit site
+# compiles to nothing; release builds pay zero cost.
+trace = []
+
 [dependencies]
 # Optional under the `registry` feature so consumers can use the parser
 # API without pulling the framework dependency tree.

@@ -41,6 +41,8 @@ pub mod ascii;
 pub mod binary;
 pub mod decoder;
 pub mod encoder;
+#[cfg(feature = "trace")]
+pub mod trace;
 
 pub use decoder::StlDecoder;
 pub use encoder::StlEncoder;
