@@ -46,9 +46,10 @@ pub(crate) mod materialise_header;
 #[cfg(feature = "trace")]
 pub mod trace;
 
+pub use ascii::EncodeOptions as AsciiEncodeOptions;
 pub use color::{detect as detect_color_convention, ColorConvention, Stl16BitColor};
 pub use decoder::StlDecoder;
-pub use encoder::StlEncoder;
+pub use encoder::{EncodeStats, StlEncoder};
 
 /// Format-id string used in the [`Mesh3DRegistry`](oxideav_mesh3d::Mesh3DRegistry).
 pub const FORMAT_ID: &str = "stl";

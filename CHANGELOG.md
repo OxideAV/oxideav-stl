@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 3 — multi-`solid` ASCII parsing + per-mesh emit.
+  - The decoder now accepts back-to-back `solid NAME … endsolid NAME`
+    blocks (older Pro/E + AutoCAD ASCII exporters concatenate
+    multiple). Each block becomes its own `Mesh` in the resulting
+    `Scene3D`, with one root `Node` per mesh in source order. The
+    historical single-block path is unchanged.
+  - The encoder mirrors the decoder: multi-mesh scenes round-trip as
+    one `solid NAME … endsolid NAME` block per mesh; single-mesh
+    scenes still produce a single block. Empty scenes emit
+    `solid\nendsolid\n`.
+  - Stray non-`solid` content between blocks is rejected with a clear
+    `InvalidData` error rather than producing a partial scene.
+
+- Round 3 — ASCII pretty-printer with configurable float precision.
+  - New `oxideav_stl::AsciiEncodeOptions` struct with optional
+    `float_precision` field; `StlEncoder::with_float_precision(Some(n))`
+    switches the ASCII encoder to fixed-decimal `{:.n}` output.
+  - The default (`None`) preserves the historical round-trip-safe
+    `{}` formatting — every existing test and consumer is untouched.
+  - The knob has no effect on binary output; binary triangle records
+    remain byte-identical regardless of the precision setting.
+
+- Round 3 — pre-encode statistics (`StlEncoder::stats`).
+  - New `EncodeStats { triangles, emitted_vertices, unique_vertices }`
+    summary computed without paying for the full encode pass.
+  - `unique_vertices` deduplicates by exact `f32` bit pattern (the
+    only definition that is well-defined for floats given that
+    `0.1 + 0.2 != 0.3`); a fully-shared cube (8 corners, 12 triangles)
+    reports `unique_vertices == 8` even though `emitted_vertices == 36`.
+  - `EncodeStats::share_factor()` returns `emitted_vertices /
+    unique_vertices` (4.5 for the cube above), useful for tooling that
+    reports compression ratios.
+
 - Round 3 — Materialise binary-header per-object default colour and
   material round-trip.
   - The 80-byte binary STL header is scanned on decode for

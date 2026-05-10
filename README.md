@@ -43,6 +43,61 @@ A layered set of signals distinguishes ASCII from binary:
    binary headers that embed a `\n facet` substring inside the
    80-byte vendor string.
 
+## Materialise per-object default colour and material
+
+Materialise Magics writes per-object default tokens into the 80-byte
+binary STL header as ASCII lines:
+
+```text
+COLOR=R G B A
+MATERIAL=Ar Ag Ab Sa Dr Dg Db Sd Sr Sg Sb Ss
+```
+
+Either or both are picked up on decode and surfaced on
+`Primitive::extras["stl:default_color"]` (4-element `u8` JSON array)
+and `Primitive::extras["stl:default_material"]` (12-element `u8` JSON
+array). The encoder rebuilds a Materialise-compatible header on
+re-emit when either key is set, so the round-trip is faithful. These
+defaults are what per-face slots whose Materialise "valid" bit reports
+"use default" refer back to.
+
+## Multi-`solid` ASCII files
+
+Older Pro/E + AutoCAD exporters concatenate multiple `solid NAME …
+endsolid NAME` blocks into a single `.stl`. Each block becomes its
+own `Mesh` in the resulting `Scene3D`, with one root `Node` per mesh
+attached to the scene's `roots` list in source order. The encoder
+mirrors this on output.
+
+## ASCII float-precision knob
+
+By default the ASCII encoder uses Rust's round-trip-safe `{}`
+formatter for f32 values. Switch to fixed-decimal output for
+human-readable diffs:
+
+```rust
+use oxideav_stl::StlEncoder;
+
+let _enc = StlEncoder::new_ascii().with_float_precision(Some(6));
+// vertex 0.123457 0.000000 0.000000
+```
+
+Has no effect on binary output.
+
+## Pre-encode statistics
+
+`StlEncoder::stats(&scene)` returns an `EncodeStats { triangles,
+emitted_vertices, unique_vertices }` summary without paying for the
+full encode pass. Useful for tooling that wants to report
+shared-index → STL expansion ratios:
+
+```rust
+let s = oxideav_stl::StlEncoder::stats(&scene);
+println!("share factor = {:.2}", s.share_factor());
+```
+
+Unique-vertex matching uses exact `f32` bit-pattern comparison.
+
 ## 16-bit per-face colour
 
 The binary STL `uint16` attribute slot (spec-defined as zero) is
@@ -115,22 +170,16 @@ The encoder + decoder API stays available; the `register()` entry
 point + `Mesh3DRegistry` plumbing disappear and the error type falls
 back to `oxideav_mesh3d`'s crate-local enum.
 
-## Round 3 candidates
+## Round 4 candidates
 
-- Materialise binary-header `COLOR=R G B A` / `MATERIAL=…` line →
-  `Mesh::extras["stl:default_color"]` so per-object default lights
-  up the slots that the per-face Materialise convention encodes as
-  "use default" (`valid=0`).
-- ASCII tolerance: empty `solid` / `endsolid` lines without the
-  trailing name; multiple `solid` blocks in a single file (rare but
-  seen from CAD exports).
-- Vertex deduplication on encode (currently emits 3 unique vertices
-  per triangle even when the input mesh had a shared index buffer).
-- ASCII pretty-printer with configurable float precision (currently
-  defaults to single-precision `{}` formatting).
 - Trace-tape companion docs (`docs/3d/stl/trace-contract.md`) so
   cross-impl auditors can lockstep against the schema without
   reading source.
+- Tolerance-based vertex dedup (current `EncodeStats::unique_vertices`
+  uses exact `f32` bit-pattern matching).
+- Optional per-mesh emit-time auto-injection of
+  `stl:unique_vertex_count` into `Primitive::extras` for scenes whose
+  `share_factor() > 1.5`.
 
 ## License
 

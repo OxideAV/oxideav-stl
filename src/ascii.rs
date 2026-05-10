@@ -30,6 +30,15 @@ use std::fmt::Write as _;
 use oxideav_mesh3d::{Axis, Error, Mesh, Node, Primitive, Result, Scene3D, Topology, Unit};
 
 /// Parse an ASCII STL byte slice into a [`Scene3D`].
+///
+/// Some CAD exporters (older Pro/E, AutoCAD, hand-edited files)
+/// concatenate multiple `solid NAME … endsolid NAME` blocks into a
+/// single `.stl` file. The strict 1989 spec defines exactly one
+/// `solid` block per file but the de-facto tolerance across modern
+/// readers is to accept additional blocks back-to-back. We follow that
+/// tolerance: each `solid` block becomes its own [`Mesh`] in the
+/// resulting [`Scene3D`], with one [`Node`] per mesh attached to the
+/// scene root in source order.
 pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     // ASCII STL is restricted to printable ASCII + standard whitespace
     // by the spec; we tolerate UTF-8 in the optional `<name>` field via
@@ -41,87 +50,155 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
         .map_err(|e| Error::InvalidData(format!("ASCII STL is not valid UTF-8: {e}")))?;
 
     let mut p = Parser::new(text);
-    p.skip_ws();
-    p.expect_keyword("solid")?;
-    let name = p.read_optional_line_remainder();
 
     #[cfg(feature = "trace")]
     let tracer = crate::trace::Tracer::from_env();
     #[cfg(feature = "trace")]
-    if let Some(t) = tracer.as_ref() {
-        t.emit(crate::trace::Event::Header {
-            format: crate::trace::Format::Ascii,
-            byte_len: bytes.len(),
-            header_hex: None,
-            name: name.as_deref(),
-        });
-    }
-
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    // `tri_index` drives the trace-event `index` field; only counted
-    // when the trace feature is on.
-    #[cfg(feature = "trace")]
     let mut tri_index: usize = 0;
+    // For the trace `header` event we keep the name of the *first*
+    // solid block (consistent with single-solid behaviour). Multi-solid
+    // names beyond the first are reflected via per-mesh `Mesh::name`.
+    #[cfg(feature = "trace")]
+    let mut emitted_header = false;
 
+    let mut scene = Scene3D::new();
+    scene.up_axis = Axis::PosZ;
+    scene.unit = Unit::Millimetres;
+
+    let mut block_count = 0usize;
     loop {
         p.skip_ws();
-        if p.peek_keyword_eq("endsolid") {
-            p.expect_keyword("endsolid")?;
-            // Consume optional trailing name on `endsolid`.
-            let _ = p.read_optional_line_remainder();
+        if p.is_eof() {
+            // No further `solid` block — clean end.
             break;
         }
-        // Otherwise expect a `facet normal nx ny nz` block.
-        p.expect_keyword("facet")?;
-        p.skip_ws();
-        p.expect_keyword("normal")?;
-        let n = [p.read_float()?, p.read_float()?, p.read_float()?];
-
-        p.skip_ws();
-        p.expect_keyword("outer")?;
-        p.skip_ws();
-        p.expect_keyword("loop")?;
-
-        // Read three vertices in source order. We capture them into
-        // local bindings (rather than only `positions.push`) so the
-        // trace emitter can see them.
-        p.skip_ws();
-        p.expect_keyword("vertex")?;
-        let v0 = [p.read_float()?, p.read_float()?, p.read_float()?];
-        p.skip_ws();
-        p.expect_keyword("vertex")?;
-        let v1 = [p.read_float()?, p.read_float()?, p.read_float()?];
-        p.skip_ws();
-        p.expect_keyword("vertex")?;
-        let v2 = [p.read_float()?, p.read_float()?, p.read_float()?];
-        positions.push(v0);
-        normals.push(n);
-        positions.push(v1);
-        normals.push(n);
-        positions.push(v2);
-        normals.push(n);
+        if !p.peek_keyword_eq("solid") {
+            // Stray garbage between blocks — strict-mode reject.
+            // (Trailing newlines etc. were already consumed by skip_ws.)
+            let snippet: String = p.src[p.pos..]
+                .chars()
+                .take(16)
+                .filter(|c| !c.is_control())
+                .collect();
+            return Err(Error::InvalidData(format!(
+                "ASCII STL: expected `solid` or end-of-file, got `{snippet}`"
+            )));
+        }
+        p.expect_keyword("solid")?;
+        let name = p.read_optional_line_remainder();
 
         #[cfg(feature = "trace")]
-        if let Some(t) = tracer.as_ref() {
-            t.emit(crate::trace::Event::Triangle {
-                index: tri_index,
-                normal: n,
-                v0,
-                v1,
-                v2,
-                attribute_bytes: None,
-            });
-        }
-        #[cfg(feature = "trace")]
-        {
-            tri_index += 1;
+        if !emitted_header {
+            if let Some(t) = tracer.as_ref() {
+                t.emit(crate::trace::Event::Header {
+                    format: crate::trace::Format::Ascii,
+                    byte_len: bytes.len(),
+                    header_hex: None,
+                    name: name.as_deref(),
+                });
+            }
+            emitted_header = true;
         }
 
-        p.skip_ws();
-        p.expect_keyword("endloop")?;
-        p.skip_ws();
-        p.expect_keyword("endfacet")?;
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let mut normals: Vec<[f32; 3]> = Vec::new();
+
+        loop {
+            p.skip_ws();
+            if p.peek_keyword_eq("endsolid") {
+                p.expect_keyword("endsolid")?;
+                // Consume optional trailing name on `endsolid`.
+                let _ = p.read_optional_line_remainder();
+                break;
+            }
+            // Otherwise expect a `facet normal nx ny nz` block.
+            p.expect_keyword("facet")?;
+            p.skip_ws();
+            p.expect_keyword("normal")?;
+            let n = [p.read_float()?, p.read_float()?, p.read_float()?];
+
+            p.skip_ws();
+            p.expect_keyword("outer")?;
+            p.skip_ws();
+            p.expect_keyword("loop")?;
+
+            // Read three vertices in source order. We capture them into
+            // local bindings (rather than only `positions.push`) so the
+            // trace emitter can see them.
+            p.skip_ws();
+            p.expect_keyword("vertex")?;
+            let v0 = [p.read_float()?, p.read_float()?, p.read_float()?];
+            p.skip_ws();
+            p.expect_keyword("vertex")?;
+            let v1 = [p.read_float()?, p.read_float()?, p.read_float()?];
+            p.skip_ws();
+            p.expect_keyword("vertex")?;
+            let v2 = [p.read_float()?, p.read_float()?, p.read_float()?];
+            positions.push(v0);
+            normals.push(n);
+            positions.push(v1);
+            normals.push(n);
+            positions.push(v2);
+            normals.push(n);
+
+            #[cfg(feature = "trace")]
+            if let Some(t) = tracer.as_ref() {
+                t.emit(crate::trace::Event::Triangle {
+                    index: tri_index,
+                    normal: n,
+                    v0,
+                    v1,
+                    v2,
+                    attribute_bytes: None,
+                });
+            }
+            #[cfg(feature = "trace")]
+            {
+                tri_index += 1;
+            }
+
+            p.skip_ws();
+            p.expect_keyword("endloop")?;
+            p.skip_ws();
+            p.expect_keyword("endfacet")?;
+        }
+
+        let mut prim_extras: HashMap<String, serde_json::Value> = HashMap::new();
+        prim_extras.insert(
+            "stl:source".to_string(),
+            serde_json::Value::String("ascii".to_string()),
+        );
+
+        let primitive = Primitive {
+            topology: Topology::Triangles,
+            positions,
+            normals: Some(normals),
+            tangents: None,
+            uvs: Vec::new(),
+            colors: Vec::new(),
+            joints: None,
+            weights: None,
+            indices: None,
+            material: None,
+            extras: prim_extras,
+        };
+
+        let mesh = Mesh {
+            name: name.filter(|s| !s.is_empty()),
+            primitives: vec![primitive],
+        };
+        let mesh_id = scene.add_mesh(mesh);
+        let mut node = Node::new();
+        node.mesh = Some(mesh_id);
+        let node_id = scene.add_node(node);
+        scene.add_root(node_id);
+        block_count += 1;
+    }
+
+    if block_count == 0 {
+        return Err(Error::InvalidData(
+            "ASCII STL: no `solid` block found".into(),
+        ));
     }
 
     #[cfg(feature = "trace")]
@@ -132,165 +209,179 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
             triangles_emitted: tri_index,
         });
     }
-
-    let mut prim_extras: HashMap<String, serde_json::Value> = HashMap::new();
-    prim_extras.insert(
-        "stl:source".to_string(),
-        serde_json::Value::String("ascii".to_string()),
-    );
-
-    let primitive = Primitive {
-        topology: Topology::Triangles,
-        positions,
-        normals: Some(normals),
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        extras: prim_extras,
-    };
-
-    let mesh = Mesh {
-        name: name.filter(|s| !s.is_empty()),
-        primitives: vec![primitive],
-    };
-
-    let mut scene = Scene3D::new();
-    scene.up_axis = Axis::PosZ;
-    scene.unit = Unit::Millimetres;
-    let mesh_id = scene.add_mesh(mesh);
-    let mut node = Node::new();
-    node.mesh = Some(mesh_id);
-    let node_id = scene.add_node(node);
-    scene.add_root(node_id);
     Ok(scene)
 }
 
 /// Serialise a [`Scene3D`] as ASCII STL.
+///
+/// Multi-mesh scenes round-trip as multiple `solid NAME … endsolid
+/// NAME` blocks back-to-back, mirroring the multi-solid tolerance of
+/// [`decode`]. Single-mesh scenes still produce a single block. The
+/// per-mesh `Mesh::name` (when set) drives the `solid` / `endsolid`
+/// trailing name; meshes with no name emit a bare `solid` line.
 pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
-    let mut out = String::new();
+    encode_with(scene, &EncodeOptions::default())
+}
 
-    // Pick a name from the first mesh that has one — the spec only
-    // allows one `solid` block, so even multi-mesh scenes flatten.
-    let name = scene
-        .meshes
-        .iter()
-        .find_map(|m| m.name.as_deref())
-        .unwrap_or("");
+/// Float formatting precision for [`encode_with`]. Defaults to
+/// Rust's `{}` round-trip formatting; pass `Some(n)` to get
+/// `{:.n}` fixed-decimal output (e.g. for human-readable diffs).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EncodeOptions {
+    /// Number of decimal digits after the point. `None` =
+    /// round-trip-safe `{}`. `Some(n)` = `{:.n}`.
+    pub float_precision: Option<usize>,
+}
 
-    if name.is_empty() {
-        out.push_str("solid\n");
-    } else {
-        let _ = writeln!(out, "solid {name}");
+impl EncodeOptions {
+    /// Convenience: build with a fixed decimal precision.
+    pub fn with_float_precision(precision: usize) -> Self {
+        Self {
+            float_precision: Some(precision),
+        }
     }
+}
+
+/// Serialise a [`Scene3D`] as ASCII STL using `opts`.
+///
+/// See [`EncodeOptions`] for the knobs. Behaviour is identical to
+/// [`encode`] when `opts` is the default.
+pub fn encode_with(scene: &Scene3D, opts: &EncodeOptions) -> Result<Vec<u8>> {
+    let mut out = String::new();
 
     #[cfg(feature = "trace")]
     let tracer = crate::trace::Tracer::from_env();
+    #[cfg(feature = "trace")]
+    let mut tri_index: usize = 0;
+    // The trace `header` event captures the *first* mesh's name —
+    // multi-solid output reflects further names via the per-mesh
+    // emitted bytes (visible to a downstream re-decode).
+    #[cfg(feature = "trace")]
+    let first_name: Option<&str> = scene
+        .meshes
+        .iter()
+        .find_map(|m| m.name.as_deref())
+        .filter(|s| !s.is_empty());
     #[cfg(feature = "trace")]
     if let Some(t) = tracer.as_ref() {
         t.emit(crate::trace::Event::Header {
             format: crate::trace::Format::Ascii,
             byte_len: 0, // unknown until done — emitter reads `out.len()` at end
             header_hex: None,
-            name: if name.is_empty() { None } else { Some(name) },
+            name: first_name,
         });
     }
-    #[cfg(feature = "trace")]
-    let mut tri_index: usize = 0;
 
-    for mesh in &scene.meshes {
-        for prim in &mesh.primitives {
-            if prim.topology != Topology::Triangles {
-                return Err(Error::Unsupported(format!(
-                    "STL only supports Triangles topology; got {:?}",
-                    prim.topology
-                )));
+    // Multi-mesh scenes emit one `solid NAME … endsolid NAME` block
+    // per mesh (preserving order); single-mesh / empty scenes still
+    // produce a single block (the historical contract). When there are
+    // zero meshes we still emit one empty block so the file is a valid
+    // ASCII STL ("solid\nendsolid\n").
+    let blocks: Vec<&Mesh> = if scene.meshes.is_empty() {
+        Vec::new()
+    } else {
+        scene.meshes.iter().collect()
+    };
+
+    if blocks.is_empty() {
+        out.push_str("solid\nendsolid\n");
+    } else {
+        for mesh in blocks {
+            let name = mesh.name.as_deref().unwrap_or("");
+            if name.is_empty() {
+                out.push_str("solid\n");
+            } else {
+                let _ = writeln!(out, "solid {name}");
             }
-            let face_count = match &prim.indices {
-                Some(idx) => idx.len() / 3,
-                None => prim.positions.len() / 3,
-            };
-            for face_idx in 0..face_count {
-                let (vi0, vi1, vi2) = match &prim.indices {
-                    Some(oxideav_mesh3d::Indices::U16(v)) => {
-                        let b = face_idx * 3;
-                        (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
-                    }
-                    Some(oxideav_mesh3d::Indices::U32(v)) => {
-                        let b = face_idx * 3;
-                        (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
-                    }
-                    None => {
-                        let b = face_idx * 3;
-                        (b, b + 1, b + 2)
-                    }
-                };
-                let v0 = prim.positions[vi0];
-                let v1 = prim.positions[vi1];
-                let v2 = prim.positions[vi2];
-                let n = match prim.normals.as_ref() {
-                    Some(ns) if ns.len() == prim.positions.len() => ns[vi0],
-                    _ => face_normal(v0, v1, v2),
-                };
-
-                #[cfg(feature = "trace")]
-                if let Some(t) = tracer.as_ref() {
-                    t.emit(crate::trace::Event::Triangle {
-                        index: tri_index,
-                        normal: n,
-                        v0,
-                        v1,
-                        v2,
-                        attribute_bytes: None,
-                    });
+            for prim in &mesh.primitives {
+                if prim.topology != Topology::Triangles {
+                    return Err(Error::Unsupported(format!(
+                        "STL only supports Triangles topology; got {:?}",
+                        prim.topology
+                    )));
                 }
-                #[cfg(feature = "trace")]
-                {
-                    tri_index += 1;
-                }
+                let face_count = match &prim.indices {
+                    Some(idx) => idx.len() / 3,
+                    None => prim.positions.len() / 3,
+                };
+                for face_idx in 0..face_count {
+                    let (vi0, vi1, vi2) = match &prim.indices {
+                        Some(oxideav_mesh3d::Indices::U16(v)) => {
+                            let b = face_idx * 3;
+                            (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+                        }
+                        Some(oxideav_mesh3d::Indices::U32(v)) => {
+                            let b = face_idx * 3;
+                            (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+                        }
+                        None => {
+                            let b = face_idx * 3;
+                            (b, b + 1, b + 2)
+                        }
+                    };
+                    let v0 = prim.positions[vi0];
+                    let v1 = prim.positions[vi1];
+                    let v2 = prim.positions[vi2];
+                    let n = match prim.normals.as_ref() {
+                        Some(ns) if ns.len() == prim.positions.len() => ns[vi0],
+                        _ => face_normal(v0, v1, v2),
+                    };
 
-                let _ = writeln!(
-                    out,
-                    "  facet normal {} {} {}",
-                    fmt_f32(n[0]),
-                    fmt_f32(n[1]),
-                    fmt_f32(n[2])
-                );
-                out.push_str("    outer loop\n");
-                let _ = writeln!(
-                    out,
-                    "      vertex {} {} {}",
-                    fmt_f32(v0[0]),
-                    fmt_f32(v0[1]),
-                    fmt_f32(v0[2])
-                );
-                let _ = writeln!(
-                    out,
-                    "      vertex {} {} {}",
-                    fmt_f32(v1[0]),
-                    fmt_f32(v1[1]),
-                    fmt_f32(v1[2])
-                );
-                let _ = writeln!(
-                    out,
-                    "      vertex {} {} {}",
-                    fmt_f32(v2[0]),
-                    fmt_f32(v2[1]),
-                    fmt_f32(v2[2])
-                );
-                out.push_str("    endloop\n");
-                out.push_str("  endfacet\n");
+                    #[cfg(feature = "trace")]
+                    if let Some(t) = tracer.as_ref() {
+                        t.emit(crate::trace::Event::Triangle {
+                            index: tri_index,
+                            normal: n,
+                            v0,
+                            v1,
+                            v2,
+                            attribute_bytes: None,
+                        });
+                    }
+                    #[cfg(feature = "trace")]
+                    {
+                        tri_index += 1;
+                    }
+
+                    let _ = writeln!(
+                        out,
+                        "  facet normal {} {} {}",
+                        fmt_f32_with(n[0], opts),
+                        fmt_f32_with(n[1], opts),
+                        fmt_f32_with(n[2], opts)
+                    );
+                    out.push_str("    outer loop\n");
+                    let _ = writeln!(
+                        out,
+                        "      vertex {} {} {}",
+                        fmt_f32_with(v0[0], opts),
+                        fmt_f32_with(v0[1], opts),
+                        fmt_f32_with(v0[2], opts)
+                    );
+                    let _ = writeln!(
+                        out,
+                        "      vertex {} {} {}",
+                        fmt_f32_with(v1[0], opts),
+                        fmt_f32_with(v1[1], opts),
+                        fmt_f32_with(v1[2], opts)
+                    );
+                    let _ = writeln!(
+                        out,
+                        "      vertex {} {} {}",
+                        fmt_f32_with(v2[0], opts),
+                        fmt_f32_with(v2[1], opts),
+                        fmt_f32_with(v2[2], opts)
+                    );
+                    out.push_str("    endloop\n");
+                    out.push_str("  endfacet\n");
+                }
+            }
+            if name.is_empty() {
+                out.push_str("endsolid\n");
+            } else {
+                let _ = writeln!(out, "endsolid {name}");
             }
         }
-    }
-
-    if name.is_empty() {
-        out.push_str("endsolid\n");
-    } else {
-        let _ = writeln!(out, "endsolid {name}");
     }
 
     #[cfg(feature = "trace")]
@@ -305,16 +396,18 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
     Ok(out.into_bytes())
 }
 
-/// f32 formatter that emits a guaranteed-finite-looking string. The
-/// spec allows `1.23456E+789`-style scientific notation; Rust's
-/// default `Display` for `f32` is already round-trip-safe, so we use
-/// it directly and translate non-finite values to `0` (STL has no
-/// representation for NaN / Inf).
-fn fmt_f32(v: f32) -> String {
-    if v.is_finite() {
-        format!("{v}")
-    } else {
-        "0".to_string()
+/// f32 formatter parameterised by [`EncodeOptions`]. With
+/// `float_precision = None` (the default) emits Rust's round-trip-safe
+/// `{}`; with `Some(n)` produces `{:.n}` fixed-decimal output. Non-
+/// finite values become `0` since STL has no representation for NaN
+/// or Inf.
+fn fmt_f32_with(v: f32, opts: &EncodeOptions) -> String {
+    if !v.is_finite() {
+        return "0".to_string();
+    }
+    match opts.float_precision {
+        None => format!("{v}"),
+        Some(p) => format!("{v:.p$}"),
     }
 }
 
@@ -345,6 +438,11 @@ struct Parser<'a> {
 impl<'a> Parser<'a> {
     fn new(src: &'a str) -> Self {
         Self { src, pos: 0 }
+    }
+
+    /// Whether the parser has consumed all input.
+    fn is_eof(&self) -> bool {
+        self.pos >= self.src.len()
     }
 
     /// Skip ASCII whitespace including newlines + tabs.
