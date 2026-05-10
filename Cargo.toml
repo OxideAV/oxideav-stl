@@ -1,0 +1,41 @@
+[package]
+name = "oxideav-stl"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["Mark Karpeles <admin@echelle.co.jp>"]
+description = "Pure-Rust STL (stereolithography) ASCII + binary mesh codec — implements oxideav-mesh3d's Decoder/Encoder traits"
+repository = "https://github.com/OxideAV/oxideav-stl"
+homepage = "https://github.com/OxideAV/oxideav-stl"
+readme = "README.md"
+keywords = ["stl", "3d", "mesh", "stereolithography", "oxideav"]
+categories = ["multimedia::encoding", "rendering::data-formats"]
+
+[features]
+default = ["registry"]
+
+# `registry` wires up `Mesh3DRegistry::register_decoder` /
+# `register_encoder` against `oxideav-core` so this crate plugs into the
+# broader oxideav framework. Drop it (`default-features = false`) for a
+# free-standing build that only exposes the parsers + Decoder/Encoder
+# trait impls (Decoder/Encoder traits come from `oxideav-mesh3d`, which
+# itself follows the same standalone-friendly pattern).
+registry = ["dep:oxideav-core", "oxideav-mesh3d/registry"]
+
+[dependencies]
+# Optional under the `registry` feature so consumers can use the parser
+# API without pulling the framework dependency tree.
+oxideav-core = { version = "0.1", optional = true }
+# `oxideav-mesh3d` carries the typed Scene3D / Mesh / Primitive model
+# and the `Mesh3DDecoder` / `Mesh3DEncoder` traits this crate
+# implements. We disable its default features and re-enable `registry`
+# only when our own `registry` feature is on, so the standalone build
+# path stays oxideav-core-free end-to-end.
+oxideav-mesh3d = { version = "0.0", default-features = false }
+# Used directly to populate `Primitive::extras` /
+# `Mesh::extras` (which are typed as
+# `HashMap<String, serde_json::Value>` by oxideav-mesh3d). This is a
+# transitive dep of oxideav-mesh3d already; we name it explicitly so
+# the standalone build path resolves the symbol at the call site.
+serde_json = "1"
