@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.1](https://github.com/OxideAV/oxideav-stl/compare/v0.0.0...v0.0.1) - 2026-05-10
+
+### Other
+
+- Round 6 — opt-in geometry validation + bbox + non_exhaustive cascade
+- add Primitive.targets + Mesh.weights to all literal sites
+- Add Primitive.targets + Mesh.weights to literal struct sites
+- Round 5 — README: spatial dedup + share_stats trace event
+- Round 5 — spatial-grid variant of tolerance-based vertex dedup
+- Round 5 — ASCII-mode parity test for apply_pre_encode_extras
+- Round 5 — share_stats JSONL trace event (encoder-only)
+- Round 4 — docs/trace-contract.md companion document
+- Round 4 — opt-in auto-inject of stl:unique_vertex_count extras
+- Round 4 — tolerance-based vertex dedup helpers
+- Round 3 — multi-solid ASCII + float-precision knob + EncodeStats
+- Round 3 — Materialise binary-header default colour + material round-trip
+- Round 2 — 16-bit per-face colour extension (VisCAM + Materialise)
+- Round 2 — JSONL trace emitter (`trace` feature)
+- Round 2 — fuzz-resistant ASCII-vs-binary detection
+
 ### Added
 
 - Round 6 — opt-in spec-aligned geometry validation.
