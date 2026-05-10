@@ -141,12 +141,14 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
 
     // The `<name>` after `solid` lives in the binary header — vendors
     // mostly fill it with their writer's signature, so we don't try
-    // to extract a logical mesh name. The header round-trips losslessly
-    // in `Mesh::extras` only if the user opts in; default decode keeps
-    // the model surface clean.
+    // to extract a logical mesh name. We DO scan the 80-byte header
+    // for Materialise's `COLOR=R G B A` and `MATERIAL=…` per-object
+    // default lines and surface them on `Primitive::extras` —
+    // see `crate::materialise_header`.
     let mut prim_extras: HashMap<String, serde_json::Value> = HashMap::new();
-    let _ = header; // header text not surfaced — kept by binary writer below
+    let (header_color, header_material) = crate::materialise_header::parse_header(header);
     let mut mesh_extras: HashMap<String, serde_json::Value> = HashMap::new();
+    crate::materialise_header::insert_extras(&mut mesh_extras, header_color, header_material);
     if any_nonzero_attr {
         mesh_extras.insert(
             PER_FACE_ATTRS_KEY.to_string(),
@@ -288,7 +290,26 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
     }
 
     let mut out = Vec::with_capacity(HEADER_BYTES + triangles.len() * TRIANGLE_BYTES);
-    out.extend_from_slice(DEFAULT_HEADER);
+    // If the first primitive carries Materialise default-color or
+    // default-material extras, build a compatible header so they
+    // round-trip; otherwise fall back to the writer-signature default
+    // header. The Materialise header is always NUL-padded to exactly
+    // 80 bytes by `build_header`, so the rest of the file layout is
+    // unchanged.
+    let materialise_header = scene
+        .meshes
+        .iter()
+        .flat_map(|m| m.primitives.iter())
+        .next()
+        .and_then(|p| {
+            let (c, m) = crate::materialise_header::extras_to_payload(&p.extras);
+            crate::materialise_header::build_header(c.as_ref(), m.as_ref())
+        });
+    if let Some(h) = materialise_header.as_ref() {
+        out.extend_from_slice(h);
+    } else {
+        out.extend_from_slice(DEFAULT_HEADER);
+    }
     let count: u32 = triangles
         .len()
         .try_into()
@@ -299,10 +320,14 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
     let tracer = crate::trace::Tracer::from_env();
     #[cfg(feature = "trace")]
     if let Some(t) = tracer.as_ref() {
+        let header_for_trace: &[u8] = match materialise_header.as_ref() {
+            Some(h) => h.as_slice(),
+            None => DEFAULT_HEADER.as_slice(),
+        };
         t.emit(crate::trace::Event::Header {
             format: crate::trace::Format::Binary,
             byte_len: HEADER_BYTES + triangles.len() * TRIANGLE_BYTES,
-            header_hex: Some(DEFAULT_HEADER),
+            header_hex: Some(header_for_trace),
             name: None,
         });
         t.emit(crate::trace::Event::TriangleCount {

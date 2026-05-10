@@ -42,6 +42,7 @@ pub mod binary;
 pub mod color;
 pub mod decoder;
 pub mod encoder;
+pub(crate) mod materialise_header;
 #[cfg(feature = "trace")]
 pub mod trace;
 

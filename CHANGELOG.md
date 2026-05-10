@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 3 — Materialise binary-header per-object default colour and
+  material round-trip.
+  - The 80-byte binary STL header is scanned on decode for
+    Materialise Magics' textual `COLOR=R G B A` and
+    `MATERIAL=Ar Ag Ab Sa Dr Dg Db Sd Sr Sg Sb Ss` lines (each
+    optional, either order). Either or both populate
+    `Primitive::extras["stl:default_color"]` (4-element `u8` JSON
+    array) and `Primitive::extras["stl:default_material"]` (12-element
+    `u8` JSON array).
+  - On encode, if either extras key is present and the right shape,
+    the encoder rebuilds a Materialise-compatible header (NUL-padded to
+    80 bytes) and emits it in place of the writer-signature default.
+    Out-of-shape values silently fall back to the default header.
+  - Token parsing is strict on count + range (`0..=255`) but tolerant
+    on order, padding, and unknown adjacent lines (vendor signatures
+    carry through). Tokens lift the per-object default that
+    Materialise's per-face `valid=0` slots refer back to.
+
 - Round 2 — 16-bit per-face colour extension support.
   - New `oxideav_stl::color` module with `ColorConvention`
     (`ViscamSolidView` / `Materialise`) + `Stl16BitColor` (5+5+5+1
