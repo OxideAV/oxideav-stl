@@ -33,8 +33,10 @@ fn synthesise_one_facet_scene() -> Scene3D {
             weights: None,
             indices: None,
             material: None,
+            targets: Vec::new(),
             extras: std::collections::HashMap::new(),
         }],
+        weights: Vec::new(),
     };
     let mid = s.add_mesh(mesh);
     let mut node = Node::new();

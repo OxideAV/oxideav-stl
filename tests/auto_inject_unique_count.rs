@@ -50,8 +50,10 @@ fn build_indexed_cube() -> Scene3D {
             weights: None,
             indices: Some(Indices::U32(indices)),
             material: None,
+            targets: Vec::new(),
             extras: HashMap::new(),
         }],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     let mid = scene.add_mesh(mesh);
@@ -84,11 +86,13 @@ fn build_unique_triangle_strip(triangles: usize) -> Scene3D {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     };
     let mesh = Mesh {
         name: None,
         primitives: vec![prim],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
@@ -210,6 +214,7 @@ fn auto_inject_skips_non_triangles_primitives() {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     });
     let enc = StlEncoder::new_binary().with_auto_inject_unique_count(true);

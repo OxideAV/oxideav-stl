@@ -19,11 +19,13 @@ fn make_lines_scene() -> Scene3D {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     };
     s.add_mesh(Mesh {
         name: None,
         primitives: vec![prim],
+        weights: Vec::new(),
     });
     s
 }
@@ -68,11 +70,13 @@ fn encoder_rejects_points_topology() {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     };
     s.add_mesh(Mesh {
         name: None,
         primitives: vec![prim],
+        weights: Vec::new(),
     });
     let err = StlEncoder::new_binary().encode(&s).unwrap_err();
     matches!(err, Error::Unsupported(_));

@@ -160,8 +160,10 @@ fn malformed_extras_value_falls_back_to_default_header() {
             weights: None,
             indices: None,
             material: None,
+            targets: Vec::new(),
             extras,
         }],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     scene.up_axis = Axis::PosZ;

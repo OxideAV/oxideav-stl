@@ -52,8 +52,10 @@ fn build_indexed_cube() -> Scene3D {
             weights: None,
             indices: Some(Indices::U32(indices)),
             material: None,
+            targets: Vec::new(),
             extras: HashMap::new(),
         }],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     let mid = scene.add_mesh(mesh);
@@ -82,11 +84,13 @@ fn build_noisy_repeated_triangle() -> Scene3D {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     };
     let mesh = Mesh {
         name: None,
         primitives: vec![prim],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
@@ -131,11 +135,13 @@ fn build_jittered_triangles(n: usize, noise: f32, seed: u64) -> Scene3D {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     };
     let mesh = Mesh {
         name: None,
         primitives: vec![prim],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
@@ -354,12 +360,14 @@ fn spatial_handles_nan_positions_without_panic() {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     };
     let mut scene = Scene3D::new();
     scene.add_mesh(Mesh {
         name: None,
         primitives: vec![prim],
+        weights: Vec::new(),
     });
     let (unique, dmap) = StlEncoder::unique_vertices_with_tolerance_spatial(&scene, 1.0e-3);
     assert_eq!(dmap.len(), 3);

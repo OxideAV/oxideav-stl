@@ -49,8 +49,10 @@ fn build_indexed_cube() -> Scene3D {
             weights: None,
             indices: Some(Indices::U32(indices)),
             material: None,
+            targets: Vec::new(),
             extras: HashMap::new(),
         }],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     let mid = scene.add_mesh(mesh);
@@ -83,11 +85,13 @@ fn build_noisy_repeated_triangle() -> Scene3D {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     };
     let mesh = Mesh {
         name: None,
         primitives: vec![prim],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
@@ -144,11 +148,13 @@ fn dedup_map_assigns_canonical_slot_indices_in_first_seen_order() {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: HashMap::new(),
     };
     let mesh = Mesh {
         name: None,
         primitives: vec![prim],
+        weights: Vec::new(),
     };
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);

@@ -126,8 +126,10 @@ fn binary_encode_emits_full_event_sequence() {
             weights: None,
             indices: None,
             material: None,
+            targets: Vec::new(),
             extras: std::collections::HashMap::new(),
         }],
+        weights: Vec::new(),
     });
     let _ = StlEncoder::new_binary().encode(&s).unwrap();
 
@@ -197,8 +199,10 @@ fn binary_encode_share_stats_reflects_indexed_cube_collapse() {
             weights: None,
             indices: Some(Indices::U32(indices)),
             material: None,
+            targets: Vec::new(),
             extras: std::collections::HashMap::new(),
         }],
+        weights: Vec::new(),
     });
     let _ = StlEncoder::new_binary().encode(&s).unwrap();
 
@@ -243,8 +247,10 @@ fn ascii_encode_emits_share_stats_before_done() {
             weights: None,
             indices: None,
             material: None,
+            targets: Vec::new(),
             extras: std::collections::HashMap::new(),
         }],
+        weights: Vec::new(),
     });
     let _ = StlEncoder::new_ascii().encode(&s).unwrap();
 
