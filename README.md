@@ -211,16 +211,22 @@ The encoder + decoder API stays available; the `register()` entry
 point + `Mesh3DRegistry` plumbing disappear and the error type falls
 back to `oxideav_mesh3d`'s crate-local enum.
 
-## Round 4 candidates
+## Trace tape (cross-impl audit)
 
-- Trace-tape companion docs (`docs/3d/stl/trace-contract.md`) so
-  cross-impl auditors can lockstep against the schema without
-  reading source.
-- Tolerance-based vertex dedup (current `EncodeStats::unique_vertices`
-  uses exact `f32` bit-pattern matching).
-- Optional per-mesh emit-time auto-injection of
-  `stl:unique_vertex_count` into `Primitive::extras` for scenes whose
-  `share_factor() > 1.5`.
+With the `trace` Cargo feature enabled and `OXIDEAV_STL_TRACE_FILE`
+pointing at a writable path, the codec emits one JSON-Lines event per
+state transition (header / triangle_count / triangle / done). The
+field schema, ordering invariants, and worked example are documented
+in `docs/trace-contract.md`; cross-implementation auditors can
+lockstep against that schema without reading source.
+
+## Round 5 candidates
+
+- Vertex-share-stats trace events (so the `trace` tape carries the
+  same diagnostic signal that `EncodeStats` does).
+- ASCII-mode auto-inject hook parity (currently `apply_pre_encode_extras`
+  is format-agnostic — exercise it through the ASCII path explicitly
+  in tests).
 
 ## License
 

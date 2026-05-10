@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 4 — `docs/trace-contract.md` companion document.
+  - One-page reference for the JSON-Lines event vocabulary the
+    `trace` Cargo feature emits — header / triangle_count /
+    triangle / done event shapes, field types, and ordering
+    invariants.
+  - Documents the multi-`solid` ASCII trace behaviour (only the
+    first block's name fires a `header` event; the tape is a flat
+    triangle stream across all blocks).
+  - Includes a worked four-line example for a single-triangle
+    binary STL so cross-impl auditors can sanity-check their tape
+    against a known-good reference without running the codec.
+
 - Round 4 — opt-in auto-injection of `stl:unique_vertex_count` extras.
   - New `StlEncoder::with_auto_inject_unique_count(bool)` setter +
     `auto_inject_unique_count()` accessor.
