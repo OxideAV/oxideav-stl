@@ -34,6 +34,9 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     // ASCII STL is restricted to printable ASCII + standard whitespace
     // by the spec; we tolerate UTF-8 in the optional `<name>` field via
     // a lossy decode, since real-world files do ship non-ASCII names.
+    // Strip an optional UTF-8 BOM first — Windows-side text editors
+    // sometimes prepend one and the decoder shouldn't trip on it.
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     let text = std::str::from_utf8(bytes)
         .map_err(|e| Error::InvalidData(format!("ASCII STL is not valid UTF-8: {e}")))?;
 

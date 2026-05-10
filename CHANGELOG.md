@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 2 — fuzz-resistant ASCII-vs-binary detection.
+  - Optional UTF-8 BOM is stripped before sniffing the prefix.
+  - Leading ASCII whitespace (spaces, tabs, CR, LF) is also stripped
+    so AutoCAD-style ASCII files with a stray leading newline are
+    classified correctly.
+  - Prefix check now requires `b"solid"` followed by an ASCII
+    whitespace byte; `b"solidWORKS"` and similar SolidWorks-style
+    binary headers are rejected at the prefix stage.
+  - **Binary-size cross-check** — even when the prefix + `\nfacet`
+    token sniff both pass, the detector overrides to binary if the
+    file length matches `84 + N*50` for the LE `u32` count at offset
+    80 (and `N > 0`). This catches CADKey-2002 / Microsoft / AutoCAD
+    binary headers that happen to embed a `\n facet` substring inside
+    the 80-byte vendor string.
+  - ASCII parser additionally strips a UTF-8 BOM at the byte-slice
+    level so callers that bypass the detector still get a clean
+    parse.
+
 - Round 1 — initial bootstrap.
   - `StlDecoder` + `StlEncoder` implementing
     `oxideav_mesh3d::Mesh3DDecoder` / `Mesh3DEncoder` for both ASCII
