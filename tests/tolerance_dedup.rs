@@ -11,8 +11,6 @@
 //! ε-equality view of the same scene, leaving the bit-exact path
 //! untouched.
 
-use std::collections::HashMap;
-
 use oxideav_mesh3d::{Indices, Mesh, Node, Primitive, Scene3D, Topology};
 use oxideav_stl::{EncodeStats, StlEncoder};
 
@@ -36,24 +34,10 @@ fn build_indexed_cube() -> Scene3D {
         1, 2, 6, 1, 6, 5, // right
         0, 4, 7, 0, 7, 3, // left
     ];
-    let mesh = Mesh {
-        name: Some("cube".into()),
-        primitives: vec![Primitive {
-            topology: Topology::Triangles,
-            positions,
-            normals: None,
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: Some(Indices::U32(indices)),
-            material: None,
-            targets: Vec::new(),
-            extras: HashMap::new(),
-        }],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    prim.indices = Some(Indices::U32(indices));
+    let mesh = Mesh::new(Some("cube".to_string())).with_primitive(prim);
     let mut scene = Scene3D::new();
     let mid = scene.add_mesh(mesh);
     let mut node = Node::new();
@@ -74,25 +58,9 @@ fn build_noisy_repeated_triangle() -> Scene3D {
     positions.extend(canonical);
     positions.extend(canonical.iter().map(|v| perturb(*v, 1e-6)));
     positions.extend(canonical.iter().map(|v| perturb(*v, -1e-6)));
-    let prim = Primitive {
-        topology: Topology::Triangles,
-        positions,
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    };
-    let mesh = Mesh {
-        name: None,
-        primitives: vec![prim],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    let mesh = Mesh::new(None::<String>).with_primitive(prim);
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
     scene
@@ -137,25 +105,9 @@ fn dedup_map_assigns_canonical_slot_indices_in_first_seen_order() {
         [1.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
     ];
-    let prim = Primitive {
-        topology: Topology::Triangles,
-        positions,
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    };
-    let mesh = Mesh {
-        name: None,
-        primitives: vec![prim],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    let mesh = Mesh::new(None::<String>).with_primitive(prim);
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
     let (unique, dmap) = StlEncoder::unique_vertices_with_tolerance(&scene, 0.0);

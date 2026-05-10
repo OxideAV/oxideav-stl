@@ -39,24 +39,10 @@ fn build_indexed_cube() -> Scene3D {
         1, 2, 6, 1, 6, 5, // right
         0, 4, 7, 0, 7, 3, // left
     ];
-    let mesh = Mesh {
-        name: Some("cube".into()),
-        primitives: vec![Primitive {
-            topology: Topology::Triangles,
-            positions,
-            normals: None,
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: Some(Indices::U32(indices)),
-            material: None,
-            targets: Vec::new(),
-            extras: HashMap::new(),
-        }],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    prim.indices = Some(Indices::U32(indices));
+    let mesh = Mesh::new(Some("cube".to_string())).with_primitive(prim);
     let mut scene = Scene3D::new();
     let mid = scene.add_mesh(mesh);
     let mut node = Node::new();
@@ -73,25 +59,9 @@ fn build_noisy_repeated_triangle() -> Scene3D {
     positions.extend(canonical);
     positions.extend(canonical.iter().map(|v| perturb(*v, 1e-6)));
     positions.extend(canonical.iter().map(|v| perturb(*v, -1e-6)));
-    let prim = Primitive {
-        topology: Topology::Triangles,
-        positions,
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    };
-    let mesh = Mesh {
-        name: None,
-        primitives: vec![prim],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    let mesh = Mesh::new(None::<String>).with_primitive(prim);
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
     scene
@@ -124,25 +94,9 @@ fn build_jittered_triangles(n: usize, noise: f32, seed: u64) -> Scene3D {
             ]);
         }
     }
-    let prim = Primitive {
-        topology: Topology::Triangles,
-        positions,
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    };
-    let mesh = Mesh {
-        name: None,
-        primitives: vec![prim],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    let mesh = Mesh::new(None::<String>).with_primitive(prim);
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
     scene
@@ -349,26 +303,10 @@ fn spatial_handles_nan_positions_without_panic() {
     // bit-exact and tolerance contracts. The spatial path bins NaN
     // into a sentinel cell so we exercise the same well-defined
     // contract.
-    let prim = Primitive {
-        topology: Topology::Triangles,
-        positions: vec![[f32::NAN, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = vec![[f32::NAN, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
     let mut scene = Scene3D::new();
-    scene.add_mesh(Mesh {
-        name: None,
-        primitives: vec![prim],
-        weights: Vec::new(),
-    });
+    scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
     let (unique, dmap) = StlEncoder::unique_vertices_with_tolerance_spatial(&scene, 1.0e-3);
     assert_eq!(dmap.len(), 3);
     // Each vertex is distinct (NaN doesn't compare equal to itself).

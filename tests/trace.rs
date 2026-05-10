@@ -113,24 +113,10 @@ fn binary_encode_emits_full_event_sequence() {
     trace::set_thread_trace_path(Some(path.clone()));
 
     let mut s = Scene3D::new();
-    s.add_mesh(Mesh {
-        name: Some("t".into()),
-        primitives: vec![Primitive {
-            topology: Topology::Triangles,
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: None,
-            material: None,
-            targets: Vec::new(),
-            extras: std::collections::HashMap::new(),
-        }],
-        weights: Vec::new(),
-    });
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    prim.normals = Some(vec![[0.0, 0.0, 1.0]; 3]);
+    s.add_mesh(Mesh::new(Some("t".to_string())).with_primitive(prim));
     let _ = StlEncoder::new_binary().encode(&s).unwrap();
 
     let lines = read_lines(&path);
@@ -186,24 +172,10 @@ fn binary_encode_share_stats_reflects_indexed_cube_collapse() {
         0, 4, 7, 0, 7, 3, // left
     ];
     let mut s = Scene3D::new();
-    s.add_mesh(Mesh {
-        name: Some("cube".into()),
-        primitives: vec![Primitive {
-            topology: Topology::Triangles,
-            positions,
-            normals: None,
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: Some(Indices::U32(indices)),
-            material: None,
-            targets: Vec::new(),
-            extras: std::collections::HashMap::new(),
-        }],
-        weights: Vec::new(),
-    });
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    prim.indices = Some(Indices::U32(indices));
+    s.add_mesh(Mesh::new(Some("cube".to_string())).with_primitive(prim));
     let _ = StlEncoder::new_binary().encode(&s).unwrap();
 
     let lines = read_lines(&path);
@@ -234,24 +206,10 @@ fn ascii_encode_emits_share_stats_before_done() {
     trace::set_thread_trace_path(Some(path.clone()));
 
     let mut s = Scene3D::new();
-    s.add_mesh(Mesh {
-        name: Some("t".into()),
-        primitives: vec![Primitive {
-            topology: Topology::Triangles,
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: None,
-            material: None,
-            targets: Vec::new(),
-            extras: std::collections::HashMap::new(),
-        }],
-        weights: Vec::new(),
-    });
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    prim.normals = Some(vec![[0.0, 0.0, 1.0]; 3]);
+    s.add_mesh(Mesh::new(Some("t".to_string())).with_primitive(prim));
     let _ = StlEncoder::new_ascii().encode(&s).unwrap();
 
     let lines = read_lines(&path);

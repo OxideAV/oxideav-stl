@@ -173,26 +173,18 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
         serde_json::Value::String("binary".to_string()),
     );
 
-    let primitive = Primitive {
-        topology: Topology::Triangles,
-        positions,
-        normals: Some(normals),
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: prim_extras,
-    };
+    // Forward-compatible construction: oxideav-mesh3d's `Primitive`
+    // is `#[non_exhaustive]`, so external crates must build via
+    // `Primitive::new(Topology::*)` + per-field assignment.
+    let mut primitive = Primitive::new(Topology::Triangles);
+    primitive.positions = positions;
+    primitive.normals = Some(normals);
+    primitive.extras = prim_extras;
 
-    let mesh = Mesh {
-        name: None,
-        primitives: vec![primitive],
-        weights: Vec::new(),
-    };
+    // `Mesh` is `#[non_exhaustive]`; build via `Mesh::new` + the
+    // `with_primitive` builder so we don't break when mesh3d adds
+    // further fields in future minor releases.
+    let mesh = Mesh::new(None).with_primitive(primitive);
 
     let mut scene = Scene3D::new();
     // STL files are universally treated as Z-up + millimetres by the

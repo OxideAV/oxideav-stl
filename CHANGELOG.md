@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 6 — opt-in spec-aligned geometry validation.
+  - New `oxideav_stl::validate` module with `validate(&scene, &opts)
+    -> ValidationReport` covering the four spec rules from §6.5 of
+    Marshall Burns' *Automated Fabrication* transcription:
+    facet orientation (stored normal vs recomputed-from-winding,
+    component-wise tolerance), unit-length normal, vertex-to-vertex
+    (watertight / manifold via per-edge bit-exact use counts), and
+    the SLA-era all-positive-octant rule (off by default — modern
+    slicers ignore it).
+  - `ValidationReport { triangles_total, facet_orientation_defects,
+    non_unit_normal_defects, positive_octant_defects, boundary_edges,
+    non_manifold_edges, watertight, * _examples }` — counts are
+    unbounded; per-rule `_examples` lists are capped at
+    `MAX_REPORTED_DEFECTS` (32) so the report stays cheap to log
+    even on million-triangle inputs. Each `FaceLocator { mesh,
+    primitive, face }` indexes back to the originating triangle
+    in scene-graph order + post-index-buffer-resolution face index.
+  - `ValidationOptions` lets callers toggle each rule independently
+    and override the per-rule tolerances (`DEFAULT_NORMAL_TOLERANCE`
+    + `DEFAULT_UNIT_NORMAL_TOLERANCE`, both `1e-3`). Zero-length
+    stored normals are accepted as the spec'd "consumer should
+    recompute from winding" sentinel.
+  - New `bbox(&scene) -> Option<Bbox>` returns the axis-aligned
+    bounding box of every `Triangles` vertex in the scene
+    (non-finite coordinates skipped; non-`Triangles` primitives
+    silently skipped). `Bbox::extents` / `Bbox::centre` /
+    `Bbox::is_degenerate` round out the API.
+  - Validation is **opt-in and non-mutating** — neither the encoder
+    nor decoder invokes it. Intended for pipeline tooling, bug
+    bisection, and format-conversion adapters that need to know
+    whether the source surface is watertight before exporting.
+  - 17 unit + 8 integration tests (round-trip-via-decoder unit cube
+    is clean + watertight; two-triangle ASCII strip surfaces 4
+    boundary edges; three-triangle "fin" surfaces a non-manifold
+    edge; example caps; positive-octant on/off behaviour).
+
+- Round 6 — forward-compatible `Mesh` + `Primitive` construction.
+  - Migrated every literal `Primitive { … }` site to
+    `Primitive::new(Topology::*) + per-field assignment` and every
+    literal `Mesh { … }` site to
+    `Mesh::new(name).with_primitive(prim)`. mesh3d round 7 marks
+    both structs `#[non_exhaustive]`; the new construction style
+    works against today's published mesh3d 0.0.1 AND the upcoming
+    non_exhaustive 0.0.2 without further churn.
+
 - Round 5 — README refresh.
   - Documents `with_tolerance_spatial` /
     `unique_vertices_with_tolerance_spatial` alongside the

@@ -9,8 +9,6 @@
 //! pure-functional on `&Scene3D`; callers opt in to the mutation by
 //! invoking the hook explicitly between configure-and-emit.
 
-use std::collections::HashMap;
-
 use oxideav_mesh3d::{
     Indices, Mesh, Mesh3DDecoder, Mesh3DEncoder, Node, Primitive, Scene3D, Topology,
 };
@@ -37,24 +35,10 @@ fn build_indexed_cube() -> Scene3D {
         1, 2, 6, 1, 6, 5, // right
         0, 4, 7, 0, 7, 3, // left
     ];
-    let mesh = Mesh {
-        name: Some("cube".into()),
-        primitives: vec![Primitive {
-            topology: Topology::Triangles,
-            positions,
-            normals: None,
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: Some(Indices::U32(indices)),
-            material: None,
-            targets: Vec::new(),
-            extras: HashMap::new(),
-        }],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    prim.indices = Some(Indices::U32(indices));
+    let mesh = Mesh::new(Some("cube".to_string())).with_primitive(prim);
     let mut scene = Scene3D::new();
     let mid = scene.add_mesh(mesh);
     let mut node = Node::new();
@@ -75,25 +59,9 @@ fn build_unique_triangle_strip(triangles: usize) -> Scene3D {
         positions.push([f, 1.0, 0.0]);
         positions.push([f, 0.0, 1.0]);
     }
-    let prim = Primitive {
-        topology: Topology::Triangles,
-        positions,
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    };
-    let mesh = Mesh {
-        name: None,
-        primitives: vec![prim],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = positions;
+    let mesh = Mesh::new(None::<String>).with_primitive(prim);
     let mut scene = Scene3D::new();
     scene.add_mesh(mesh);
     scene
@@ -203,20 +171,9 @@ fn auto_inject_skips_non_triangles_primitives() {
     // Triangles slot picks up the extras.
     let mut scene = build_indexed_cube();
     // Append a Lines primitive to the same mesh.
-    scene.meshes[0].primitives.push(Primitive {
-        topology: Topology::Lines,
-        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    });
+    let mut lines_prim = Primitive::new(Topology::Lines);
+    lines_prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    scene.meshes[0].primitives.push(lines_prim);
     let enc = StlEncoder::new_binary().with_auto_inject_unique_count(true);
     enc.apply_pre_encode_extras(&mut scene);
     let prims = &scene.meshes[0].primitives;

@@ -45,12 +45,17 @@ pub mod encoder;
 pub(crate) mod materialise_header;
 #[cfg(feature = "trace")]
 pub mod trace;
+pub mod validate;
 
 pub use ascii::EncodeOptions as AsciiEncodeOptions;
 pub use color::{detect as detect_color_convention, ColorConvention, Stl16BitColor};
 pub use decoder::StlDecoder;
 pub use encoder::{
     EncodeStats, StlEncoder, AUTO_INJECT_SHARE_FACTOR_THRESHOLD, UNIQUE_VERTEX_COUNT_EXTRAS_KEY,
+};
+pub use validate::{
+    bbox, validate, Bbox, FaceLocator, ValidationOptions, ValidationReport,
+    DEFAULT_NORMAL_TOLERANCE, DEFAULT_UNIT_NORMAL_TOLERANCE, MAX_REPORTED_DEFECTS,
 };
 
 /// Format-id string used in the [`Mesh3DRegistry`](oxideav_mesh3d::Mesh3DRegistry).

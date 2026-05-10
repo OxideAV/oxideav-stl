@@ -147,24 +147,11 @@ fn malformed_extras_value_falls_back_to_default_header() {
         "stl:default_color".to_string(),
         Value::Array(vec![Value::from(1u8), Value::from(2u8), Value::from(3u8)]), // length 3 != 4
     );
-    let mesh = Mesh {
-        name: None,
-        primitives: vec![Primitive {
-            topology: Topology::Triangles,
-            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: None,
-            material: None,
-            targets: Vec::new(),
-            extras,
-        }],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    prim.normals = Some(vec![[0.0, 0.0, 1.0]; 3]);
+    prim.extras = extras;
+    let mesh = Mesh::new(None::<String>).with_primitive(prim);
     let mut scene = Scene3D::new();
     scene.up_axis = Axis::PosZ;
     scene.unit = Unit::Millimetres;

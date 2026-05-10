@@ -169,26 +169,19 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
             serde_json::Value::String("ascii".to_string()),
         );
 
-        let primitive = Primitive {
-            topology: Topology::Triangles,
-            positions,
-            normals: Some(normals),
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: None,
-            material: None,
-            targets: Vec::new(),
-            extras: prim_extras,
-        };
+        // Forward-compatible construction: oxideav-mesh3d's `Primitive`
+        // is `#[non_exhaustive]`, so external crates must build via
+        // `Primitive::new(Topology::*)` + per-field assignment rather
+        // than struct-literal syntax.
+        let mut primitive = Primitive::new(Topology::Triangles);
+        primitive.positions = positions;
+        primitive.normals = Some(normals);
+        primitive.extras = prim_extras;
 
-        let mesh = Mesh {
-            name: name.filter(|s| !s.is_empty()),
-            primitives: vec![primitive],
-            weights: Vec::new(),
-        };
+        // `Mesh` is `#[non_exhaustive]`; build via `Mesh::new` + the
+        // `with_primitive` builder so we don't break when mesh3d adds
+        // further fields in future minor releases.
+        let mesh = Mesh::new(name.filter(|s| !s.is_empty())).with_primitive(primitive);
         let mesh_id = scene.add_mesh(mesh);
         let mut node = Node::new();
         node.mesh = Some(mesh_id);
@@ -580,24 +573,10 @@ mod tests {
     #[test]
     fn encoder_emits_facet_block() {
         let mut s = Scene3D::new();
-        let mesh = Mesh {
-            name: Some("t".into()),
-            primitives: vec![Primitive {
-                topology: Topology::Triangles,
-                positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
-                tangents: None,
-                uvs: Vec::new(),
-                colors: Vec::new(),
-                joints: None,
-                weights: None,
-                indices: None,
-                material: None,
-                targets: Vec::new(),
-                extras: HashMap::new(),
-            }],
-            weights: Vec::new(),
-        };
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 3]);
+        let mesh = Mesh::new(Some("t".to_string())).with_primitive(prim);
         s.add_mesh(mesh);
         let out = encode(&s).unwrap();
         let txt = std::str::from_utf8(&out).unwrap();

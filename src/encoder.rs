@@ -676,8 +676,6 @@ impl Mesh3DEncoder for StlEncoder {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use oxideav_mesh3d::{Indices, Mesh, Node, Primitive, Scene3D};
 
     use super::*;
@@ -706,24 +704,10 @@ mod tests {
             1, 2, 6, 1, 6, 5, // right
             0, 4, 7, 0, 7, 3, // left
         ];
-        let mesh = Mesh {
-            name: Some("cube".into()),
-            primitives: vec![Primitive {
-                topology: Topology::Triangles,
-                positions,
-                normals: None,
-                tangents: None,
-                uvs: Vec::new(),
-                colors: Vec::new(),
-                joints: None,
-                weights: None,
-                indices: Some(Indices::U32(indices)),
-                material: None,
-                targets: Vec::new(),
-                extras: HashMap::new(),
-            }],
-            weights: Vec::new(),
-        };
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = positions;
+        prim.indices = Some(Indices::U32(indices));
+        let mesh = Mesh::new(Some("cube".to_string())).with_primitive(prim);
         let mut scene = Scene3D::new();
         let mid = scene.add_mesh(mesh);
         let mut node = Node::new();
@@ -763,29 +747,13 @@ mod tests {
         // No index buffer + 3 unique repeated triangles → unique == 3
         // (one corner) emit == 9.
         let positions = vec![[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        let mut prim = Primitive {
-            topology: Topology::Triangles,
-            positions: positions.clone(),
-            normals: None,
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: None,
-            material: None,
-            targets: Vec::new(),
-            extras: HashMap::new(),
-        };
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = positions.clone();
         // Repeat the triangle three times — same positions, three
         // emissions worth of slots.
         prim.positions.extend(positions.clone());
         prim.positions.extend(positions.clone());
-        let mesh = Mesh {
-            name: None,
-            primitives: vec![prim],
-            weights: Vec::new(),
-        };
+        let mesh = Mesh::new(None::<String>).with_primitive(prim);
         let mut scene = Scene3D::new();
         scene.add_mesh(mesh);
         let stats = StlEncoder::stats(&scene);

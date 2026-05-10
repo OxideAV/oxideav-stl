@@ -16,28 +16,14 @@ fn synthesise_one_facet_scene() -> Scene3D {
     let mut s = Scene3D::new();
     s.up_axis = Axis::PosZ;
     s.unit = Unit::Millimetres;
-    let mesh = Mesh {
-        name: Some("t".into()),
-        primitives: vec![Primitive {
-            topology: Topology::Triangles,
-            positions: vec![
-                [0.123_456_78_f32, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-            ],
-            normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
-            tangents: None,
-            uvs: Vec::new(),
-            colors: Vec::new(),
-            joints: None,
-            weights: None,
-            indices: None,
-            material: None,
-            targets: Vec::new(),
-            extras: std::collections::HashMap::new(),
-        }],
-        weights: Vec::new(),
-    };
+    let mut prim = Primitive::new(Topology::Triangles);
+    prim.positions = vec![
+        [0.123_456_78_f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ];
+    prim.normals = Some(vec![[0.0, 0.0, 1.0]; 3]);
+    let mesh = Mesh::new(Some("t".to_string())).with_primitive(prim);
     let mid = s.add_mesh(mesh);
     let mut node = Node::new();
     node.mesh = Some(mid);

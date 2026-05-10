@@ -1,32 +1,14 @@
 //! Encoding non-`Triangles` topologies must yield
 //! `Error::Unsupported(...)`.
 
-use std::collections::HashMap;
-
 use oxideav_mesh3d::{Error, Mesh, Mesh3DEncoder, Primitive, Scene3D, Topology};
 use oxideav_stl::StlEncoder;
 
 fn make_lines_scene() -> Scene3D {
     let mut s = Scene3D::new();
-    let prim = Primitive {
-        topology: Topology::Lines,
-        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    };
-    s.add_mesh(Mesh {
-        name: None,
-        primitives: vec![prim],
-        weights: Vec::new(),
-    });
+    let mut prim = Primitive::new(Topology::Lines);
+    prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    s.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
     s
 }
 
@@ -59,25 +41,9 @@ fn ascii_encoder_rejects_lines_topology() {
 #[test]
 fn encoder_rejects_points_topology() {
     let mut s = Scene3D::new();
-    let prim = Primitive {
-        topology: Topology::Points,
-        positions: vec![[0.0, 0.0, 0.0]],
-        normals: None,
-        tangents: None,
-        uvs: Vec::new(),
-        colors: Vec::new(),
-        joints: None,
-        weights: None,
-        indices: None,
-        material: None,
-        targets: Vec::new(),
-        extras: HashMap::new(),
-    };
-    s.add_mesh(Mesh {
-        name: None,
-        primitives: vec![prim],
-        weights: Vec::new(),
-    });
+    let mut prim = Primitive::new(Topology::Points);
+    prim.positions = vec![[0.0, 0.0, 0.0]];
+    s.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
     let err = StlEncoder::new_binary().encode(&s).unwrap_err();
     matches!(err, Error::Unsupported(_));
 }

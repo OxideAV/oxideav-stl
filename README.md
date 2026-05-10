@@ -226,6 +226,35 @@ The encoder + decoder API stays available; the `register()` entry
 point + `Mesh3DRegistry` plumbing disappear and the error type falls
 back to `oxideav_mesh3d`'s crate-local enum.
 
+## Validation + bounding box
+
+Opt-in spec-aligned geometry validation lives in
+`oxideav_stl::validate`. The standard rules — facet orientation
+(right-hand rule), unit-length normal, vertex-to-vertex (watertight /
+manifold), and the SLA-era all-positive-octant rule — are applied
+to a `Scene3D` without mutating it, returning a `ValidationReport`
+with per-rule counts plus up to `MAX_REPORTED_DEFECTS` (32)
+illustrative `FaceLocator { mesh, primitive, face }` indices for
+each rule.
+
+```rust
+use oxideav_stl::{validate, ValidationOptions};
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+let report = validate(&scene, &ValidationOptions::default());
+if !report.watertight {
+    eprintln!("not watertight: {} boundary edges", report.boundary_edges);
+}
+```
+
+The positive-octant rule (which no modern slicer enforces) is off by
+default; toggle `ValidationOptions::check_positive_octant = true`
+when interoperating with strict-spec consumers. All other rules
+default on. `oxideav_stl::bbox(&scene)` returns an `Option<Bbox>`
+covering every `Triangles` vertex (non-finite coordinates skipped);
+the scene's node-graph transforms are not applied — STL produces
+identity-transform single-mesh trees in practice.
+
 ## Trace tape (cross-impl audit)
 
 With the `trace` Cargo feature enabled and `OXIDEAV_STL_TRACE_FILE`
