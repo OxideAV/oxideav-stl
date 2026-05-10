@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 5 — `share_stats` JSONL trace event (encoder-only).
+  - With `--features trace` ON and a trace path configured, both the
+    binary and ASCII encoders now emit a single `share_stats` event
+    between the final `triangle` (binary: between `triangle_count`
+    and `done`; ASCII: between `triangle_count` and `done` after the
+    triangles) carrying the same vertex-share summary the
+    synchronous `EncodeStats` API surfaces. Fields:
+    `{ "kind": "share_stats", "triangles", "emitted_vertices",
+       "unique_vertices", "share_factor", "tolerance_eps" }`.
+  - The encoder always reports the bit-exact summary
+    (`tolerance_eps == null`); tolerance variants stay on the
+    synchronous side because the trace tape is the ε-free
+    audit-handoff channel.
+  - Decoder tapes do not emit `share_stats` (no `&Scene3D` summary
+    is available at decode time). Documented in
+    `docs/trace-contract.md` alongside the updated
+    decode-vs-encode ordering invariants and the new
+    spatial-dedup notes.
+
 - Round 4 — `docs/trace-contract.md` companion document.
   - One-page reference for the JSON-Lines event vocabulary the
     `trace` Cargo feature emits — header / triangle_count /

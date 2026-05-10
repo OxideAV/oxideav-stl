@@ -72,10 +72,40 @@ triangle, monotonically increasing by one).
 `f32` array elements use Rust's default `Display` formatter (round-
 trip-safe). Non-finite components are serialised as JSON `null`.
 
+### `share_stats`
+
+**Encoder-only.** Emitted exactly once per encode call, after the
+final `triangle` event (and, for ASCII, after the `triangle_count`
+event) and before `done`. Carries the same vertex-share summary the
+`EncodeStats` API surfaces synchronously, so an auditor processing
+the JSONL tape sequentially can pick up the EncodeStats signal
+natively without re-walking the geometry.
+
+| field | type | meaning |
+|-------|------|---------|
+| `kind` | string | `"share_stats"` |
+| `triangles` | integer | total triangle count (matches `triangle_count.count`) |
+| `emitted_vertices` | integer | `triangles × 3` — STL has no vertex sharing on the wire |
+| `unique_vertices` | integer | unique-vertex count under the encoder's chosen rule |
+| `share_factor` | number | `emitted_vertices / unique_vertices`; non-finite ⇒ JSON `null` |
+| `tolerance_eps` | number or null | `null` when computed bit-exactly; the ε value otherwise |
+
+The encoder always emits the bit-exact summary (`tolerance_eps =
+null`), matching `StlEncoder::stats`. Tolerance-based variants
+(`EncodeStats::with_tolerance`) live entirely on the synchronous
+side — they do not flow through the trace tape because callers ask
+for them explicitly with their own ε.
+
+`share_stats` is not emitted on decode tapes — the decoder builds
+the `Scene3D` on the fly and has no encoder summary to report.
+Auditors comparing decode-vs-encode tapes should treat the event as
+"present on encode tapes only".
+
 ### `done`
 
 Emitted exactly once per decode/encode call, after the final
-`triangle` event.
+`triangle` event (and, on encode tapes, after the `share_stats`
+event).
 
 | field | type | meaning |
 |-------|------|---------|
@@ -85,7 +115,7 @@ Emitted exactly once per decode/encode call, after the final
 
 ## Ordering invariants
 
-The complete event sequence for any successful decode/encode call is:
+The complete event sequence for any successful **decode** call is:
 
 ```text
 header
@@ -93,6 +123,23 @@ triangle_count
 triangle (×N, with index 0..N-1 in monotonically-increasing order)
 done
 ```
+
+The complete event sequence for any successful **encode** call is:
+
+```text
+header
+triangle_count    (binary: directly after header; ascii: after the triangles)
+triangle (×N, with index 0..N-1 in monotonically-increasing order)
+share_stats
+done
+```
+
+(ASCII encode and decode tapes both interleave `triangle_count`
+*after* the triangles because the count is unknown until the parse /
+emit pass completes; binary tapes carry it up-front in both
+directions because the count is in the file header. `share_stats`
+always lands immediately before `done` on encode tapes regardless
+of format.)
 
 A failed (truncated, malformed) decode may stop emitting at any point;
 auditors should treat a missing `done` event as "incomplete tape" and
@@ -143,12 +190,12 @@ always reflects the most recent operation only. To preserve traces
 across multiple operations, the caller must rotate the file path
 externally between calls.
 
-## Worked example — binary STL, single triangle
+## Worked example — binary STL, single triangle (decode)
 
 A 134-byte binary STL (80-byte header + 4-byte count + 50-byte
 triangle) with header bytes all-zero, count = 1, normal `(0,0,1)`,
 vertices `(0,0,0)`, `(1,0,0)`, `(0,1,0)`, attribute bytes `0x12 0x34`
-emits four lines:
+emits four lines on **decode** (no `share_stats`):
 
 ```jsonl
 {"kind":"header","format":"binary","byte_len":134,"header_hex":"0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}
@@ -157,5 +204,38 @@ emits four lines:
 {"kind":"done","source":"binary","triangles_emitted":1}
 ```
 
+The matching **encode** of the same triangle (no shared vertices, so
+`share_factor == 1`) carries one extra `share_stats` line just
+before `done`:
+
+```jsonl
+{"kind":"share_stats","triangles":1,"emitted_vertices":3,"unique_vertices":3,"share_factor":1,"tolerance_eps":null}
+```
+
 (Wrapped to 80 columns above for readability; the actual tape has
 no soft-wrapping inside any single event line.)
+
+## Spatial-dedup notes
+
+`StlEncoder::unique_vertices_with_tolerance` is the brute-force
+`O(N · K)` reference path; `EncodeStats::with_tolerance_spatial`
+bins each vertex into a uniform-grid hash with cell size `eps × 2`,
+amortising to `O(N)` for typical geometry. The two paths are
+functionally equivalent for diagnostic use:
+
+- With `eps == 0.0` they produce **identical** `unique_vertices`
+  counts (both reduce to bit-exact `f32` equality on finite values).
+- With `eps > 0` the spatial path produces **at-most**-`eps`
+  grouping under the Chebyshev metric — i.e. any two vertices the
+  spatial path merges are within `eps` of each other on every axis
+  (so they would also have merged under the brute-force path
+  starting from the same canonical), but the spatial path may
+  occasionally emit one *additional* canonical when two genuinely-
+  within-`eps` points fall into non-adjacent cells. This is a
+  documented trade-off, not a bug — the spatial path is approximate
+  by design.
+
+The trace tape itself reports the bit-exact summary regardless;
+callers who want a tolerance-based summary on the trace tape compute
+it on the consumer side via `EncodeStats::with_tolerance` /
+`with_tolerance_spatial` and write their own enrichment line.

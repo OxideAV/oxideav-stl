@@ -360,6 +360,20 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
 
     #[cfg(feature = "trace")]
     if let Some(t) = tracer.as_ref() {
+        // Bit-exact share-stats summary — emitted between the final
+        // `triangle` event and `done` so a JSONL auditor sees the
+        // summary in stream order. The encoder only reports the
+        // bit-exact path here (`tolerance_eps == None`); callers
+        // reaching for the tolerance variant compute it via
+        // `EncodeStats::with_tolerance` themselves.
+        let stats = crate::encoder::compute_stats(scene);
+        t.emit(crate::trace::Event::ShareStats {
+            triangles: stats.triangles,
+            emitted_vertices: stats.emitted_vertices,
+            unique_vertices: stats.unique_vertices,
+            share_factor: stats.share_factor(),
+            tolerance_eps: None,
+        });
         t.emit(crate::trace::Event::Done {
             source: crate::trace::Format::Binary,
             triangles_emitted: triangles.len(),

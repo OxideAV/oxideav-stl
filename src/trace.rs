@@ -9,12 +9,13 @@
 //!
 //! Every event line is a single JSON object with a `"kind"` field:
 //!
-//! | `kind`           | Fields                                                         | Meaning                                                  |
-//! |------------------|----------------------------------------------------------------|----------------------------------------------------------|
-//! | `header`         | `format`, `byte_len`, `header_hex` (binary), `name` (ascii)    | One per decode/encode invocation, before any triangles   |
-//! | `triangle_count` | `count`                                                        | Binary STL: from offset 80 u32. ASCII: emitted at end    |
-//! | `triangle`       | `index`, `normal`, `v0`, `v1`, `v2`, `attribute_bytes` (binary) | One per triangle, in input order                          |
-//! | `done`           | `source`, `triangles_emitted`                                  | One at the end of the operation                          |
+//! | `kind`           | Fields                                                                                          | Meaning                                                  |
+//! |------------------|-------------------------------------------------------------------------------------------------|----------------------------------------------------------|
+//! | `header`         | `format`, `byte_len`, `header_hex` (binary), `name` (ascii)                                     | One per decode/encode invocation, before any triangles   |
+//! | `triangle_count` | `count`                                                                                         | Binary STL: from offset 80 u32. ASCII: emitted at end    |
+//! | `triangle`       | `index`, `normal`, `v0`, `v1`, `v2`, `attribute_bytes` (binary)                                 | One per triangle, in input order                          |
+//! | `share_stats`    | `triangles`, `emitted_vertices`, `unique_vertices`, `share_factor`, `tolerance_eps`             | Encoder-only: emitted just before `done` when a `Scene3D` summary is available |
+//! | `done`           | `source`, `triangles_emitted`                                                                   | One at the end of the operation                          |
 //!
 //! Field order in the serialised JSON mirrors the table above so that
 //! a `jq -c .` line-diff against another implementation's tape is
@@ -148,6 +149,23 @@ pub enum Event<'a> {
         /// ASCII STL: leave as `None`.
         attribute_bytes: Option<[u8; 2]>,
     },
+    /// Encoder-only summary of the vertex-share statistics computed
+    /// over the about-to-be-emitted [`oxideav_mesh3d::Scene3D`].
+    ///
+    /// Emitted between the final `triangle` event and the `done` event
+    /// so a downstream auditor processing the JSONL tape sequentially
+    /// can pick up the summary without re-scanning the geometry.
+    /// `tolerance_eps` is `None` when the unique-vertex count was
+    /// computed under the bit-exact `f32` rule (the encoder's own
+    /// pre-emit summary always uses this), and `Some(eps)` for the
+    /// tolerance-based variant.
+    ShareStats {
+        triangles: usize,
+        emitted_vertices: usize,
+        unique_vertices: usize,
+        share_factor: f32,
+        tolerance_eps: Option<f32>,
+    },
     Done {
         source: Format,
         triangles_emitted: usize,
@@ -195,6 +213,30 @@ impl<'a> Event<'a> {
                 push_vec3_field(out, "v2", *v2);
                 if let Some(ab) = attribute_bytes {
                     push_hex_field(out, "attribute_bytes", ab);
+                }
+                out.push('}');
+            }
+            Event::ShareStats {
+                triangles,
+                emitted_vertices,
+                unique_vertices,
+                share_factor,
+                tolerance_eps,
+            } => {
+                out.push_str("{\"kind\":\"share_stats\"");
+                push_int_field(out, "triangles", *triangles as u64);
+                push_int_field(out, "emitted_vertices", *emitted_vertices as u64);
+                push_int_field(out, "unique_vertices", *unique_vertices as u64);
+                // share_factor follows the same finite/non-finite contract
+                // as the per-vertex coordinates — non-finite ⇒ JSON null.
+                out.push(',');
+                out.push_str("\"share_factor\":");
+                push_f32(out, *share_factor);
+                out.push(',');
+                out.push_str("\"tolerance_eps\":");
+                match tolerance_eps {
+                    Some(eps) => push_f32(out, *eps),
+                    None => out.push_str("null"),
                 }
                 out.push('}');
             }
@@ -342,6 +384,41 @@ mod tests {
         let mut s = String::new();
         Event::TriangleCount { count: 12 }.write_to(&mut s);
         assert_eq!(s, r#"{"kind":"triangle_count","count":12}"#);
+    }
+
+    #[test]
+    fn share_stats_event_serialises_with_null_tolerance() {
+        let mut s = String::new();
+        Event::ShareStats {
+            triangles: 12,
+            emitted_vertices: 36,
+            unique_vertices: 8,
+            share_factor: 4.5,
+            tolerance_eps: None,
+        }
+        .write_to(&mut s);
+        assert_eq!(
+            s,
+            r#"{"kind":"share_stats","triangles":12,"emitted_vertices":36,"unique_vertices":8,"share_factor":4.5,"tolerance_eps":null}"#
+        );
+    }
+
+    #[test]
+    fn share_stats_event_serialises_with_tolerance() {
+        let mut s = String::new();
+        Event::ShareStats {
+            triangles: 3,
+            emitted_vertices: 9,
+            unique_vertices: 3,
+            share_factor: 3.0,
+            tolerance_eps: Some(1.0e-5),
+        }
+        .write_to(&mut s);
+        // 1e-5 is exactly representable as the Display form `0.00001`.
+        assert_eq!(
+            s,
+            r#"{"kind":"share_stats","triangles":3,"emitted_vertices":9,"unique_vertices":3,"share_factor":3,"tolerance_eps":0.00001}"#
+        );
     }
 
     #[test]

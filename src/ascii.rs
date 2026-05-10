@@ -387,6 +387,20 @@ pub fn encode_with(scene: &Scene3D, opts: &EncodeOptions) -> Result<Vec<u8>> {
     #[cfg(feature = "trace")]
     if let Some(t) = tracer.as_ref() {
         t.emit(crate::trace::Event::TriangleCount { count: tri_index });
+        // Bit-exact share-stats summary — emitted between
+        // `triangle_count` and `done` so the JSONL tape carries the
+        // EncodeStats signal natively without forcing a re-walk on
+        // the auditor side. Bit-exact only (`tolerance_eps == None`);
+        // tolerance variants live behind
+        // `EncodeStats::with_tolerance` on the caller.
+        let stats = crate::encoder::compute_stats(scene);
+        t.emit(crate::trace::Event::ShareStats {
+            triangles: stats.triangles,
+            emitted_vertices: stats.emitted_vertices,
+            unique_vertices: stats.unique_vertices,
+            share_factor: stats.share_factor(),
+            tolerance_eps: None,
+        });
         t.emit(crate::trace::Event::Done {
             source: crate::trace::Format::Ascii,
             triangles_emitted: tri_index,

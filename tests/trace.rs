@@ -132,11 +132,162 @@ fn binary_encode_emits_full_event_sequence() {
     let _ = StlEncoder::new_binary().encode(&s).unwrap();
 
     let lines = read_lines(&path);
-    assert_eq!(lines.len(), 4, "tape: {:?}", lines);
+    // Encoder tape has 5 events: header, triangle_count, triangle,
+    // share_stats, done. (Decode tape stays at 4 — share_stats is
+    // encoder-only because it needs `&Scene3D`.)
+    assert_eq!(lines.len(), 5, "tape: {:?}", lines);
     assert!(lines[0].contains(r#""kind":"header""#) && lines[0].contains(r#""format":"binary""#));
     assert!(lines[1].contains(r#""count":1"#));
     assert!(lines[2].contains(r#""kind":"triangle""#) && lines[2].contains(r#""index":0"#));
-    assert!(lines[3].contains(r#""kind":"done""#));
+    assert!(
+        lines[3].contains(r#""kind":"share_stats""#)
+            && lines[3].contains(r#""triangles":1"#)
+            && lines[3].contains(r#""emitted_vertices":3"#)
+            && lines[3].contains(r#""unique_vertices":3"#)
+            && lines[3].contains(r#""share_factor":1"#)
+            && lines[3].contains(r#""tolerance_eps":null"#)
+    );
+    assert!(lines[4].contains(r#""kind":"done""#));
+
+    trace::set_thread_trace_path(None);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn binary_encode_share_stats_reflects_indexed_cube_collapse() {
+    // Indexed cube — 8 unique corners, 12 triangles, 36 emitted slots,
+    // share_factor = 4.5. Verifies the share_stats event picks up the
+    // bit-exact unique-vertex count (i.e. it really walks the index
+    // buffer rather than positions.len()).
+    use oxideav_mesh3d::{Indices, Mesh, Mesh3DEncoder, Primitive, Scene3D, Topology};
+
+    let path = tmp_path("encode-binary-share-stats");
+    let _ = std::fs::remove_file(&path);
+    trace::set_thread_trace_path(Some(path.clone()));
+
+    let positions: Vec<[f32; 3]> = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ];
+    let indices: Vec<u32> = vec![
+        0, 2, 1, 0, 3, 2, // bottom
+        4, 5, 6, 4, 6, 7, // top
+        0, 1, 5, 0, 5, 4, // front
+        2, 3, 7, 2, 7, 6, // back
+        1, 2, 6, 1, 6, 5, // right
+        0, 4, 7, 0, 7, 3, // left
+    ];
+    let mut s = Scene3D::new();
+    s.add_mesh(Mesh {
+        name: Some("cube".into()),
+        primitives: vec![Primitive {
+            topology: Topology::Triangles,
+            positions,
+            normals: None,
+            tangents: None,
+            uvs: Vec::new(),
+            colors: Vec::new(),
+            joints: None,
+            weights: None,
+            indices: Some(Indices::U32(indices)),
+            material: None,
+            extras: std::collections::HashMap::new(),
+        }],
+    });
+    let _ = StlEncoder::new_binary().encode(&s).unwrap();
+
+    let lines = read_lines(&path);
+    // 1 header + 1 triangle_count + 12 triangle + 1 share_stats + 1 done = 16
+    assert_eq!(lines.len(), 16, "tape: {:?}", lines);
+    let share = lines
+        .iter()
+        .find(|l| l.contains(r#""kind":"share_stats""#))
+        .expect("share_stats event present");
+    assert!(share.contains(r#""triangles":12"#), "share: {share}");
+    assert!(share.contains(r#""emitted_vertices":36"#), "share: {share}");
+    assert!(share.contains(r#""unique_vertices":8"#), "share: {share}");
+    assert!(share.contains(r#""share_factor":4.5"#), "share: {share}");
+    assert!(share.contains(r#""tolerance_eps":null"#), "share: {share}");
+
+    trace::set_thread_trace_path(None);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn ascii_encode_emits_share_stats_before_done() {
+    // ASCII encode tape carries the same 5-event encoder sequence as
+    // binary, with `tolerance_eps == null` and a bit-exact summary.
+    use oxideav_mesh3d::{Mesh, Mesh3DEncoder, Primitive, Scene3D, Topology};
+
+    let path = tmp_path("encode-ascii-share-stats");
+    let _ = std::fs::remove_file(&path);
+    trace::set_thread_trace_path(Some(path.clone()));
+
+    let mut s = Scene3D::new();
+    s.add_mesh(Mesh {
+        name: Some("t".into()),
+        primitives: vec![Primitive {
+            topology: Topology::Triangles,
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
+            tangents: None,
+            uvs: Vec::new(),
+            colors: Vec::new(),
+            joints: None,
+            weights: None,
+            indices: None,
+            material: None,
+            extras: std::collections::HashMap::new(),
+        }],
+    });
+    let _ = StlEncoder::new_ascii().encode(&s).unwrap();
+
+    let lines = read_lines(&path);
+    // header + triangle + triangle_count + share_stats + done = 5
+    assert_eq!(lines.len(), 5, "tape: {:?}", lines);
+    // ASCII encoder emits triangle_count after the triangles (mirroring
+    // the ASCII decoder), and share_stats sits between triangle_count
+    // and done.
+    assert!(lines[0].contains(r#""kind":"header""#) && lines[0].contains(r#""format":"ascii""#));
+    assert!(lines[1].contains(r#""kind":"triangle""#));
+    assert!(lines[2].contains(r#""kind":"triangle_count""#));
+    assert!(
+        lines[3].contains(r#""kind":"share_stats""#)
+            && lines[3].contains(r#""triangles":1"#)
+            && lines[3].contains(r#""emitted_vertices":3"#)
+            && lines[3].contains(r#""unique_vertices":3"#)
+            && lines[3].contains(r#""tolerance_eps":null"#)
+    );
+    assert!(lines[4].contains(r#""kind":"done""#) && lines[4].contains(r#""source":"ascii""#));
+
+    trace::set_thread_trace_path(None);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn decode_tape_does_not_emit_share_stats() {
+    // share_stats is encoder-only — the decoder has no `&Scene3D` at
+    // emit time and the event vocabulary tolerates its absence on
+    // decode tapes by design.
+    let path = tmp_path("decode-no-share-stats");
+    let _ = std::fs::remove_file(&path);
+    trace::set_thread_trace_path(Some(path.clone()));
+
+    let bytes = synth_minimal_binary();
+    let _ = StlDecoder::new().decode(&bytes).unwrap();
+
+    let lines = read_lines(&path);
+    assert!(
+        !lines.iter().any(|l| l.contains(r#""kind":"share_stats""#)),
+        "decode tape should not emit share_stats: {:?}",
+        lines
+    );
 
     trace::set_thread_trace_path(None);
     let _ = std::fs::remove_file(&path);
