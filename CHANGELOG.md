@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 5 — spatial-grid variant of the tolerance dedup helper.
+  - New `EncodeStats::with_tolerance_spatial(scene, eps)` +
+    `StlEncoder::unique_vertices_with_tolerance_spatial(scene, eps)`.
+    Bins each emitted vertex into a uniform-grid cell of side
+    `eps × 2`, then scans the 27 surrounding cells for an existing
+    canonical within tolerance. Amortises to `O(N)` for typical
+    geometry (the brute-force `O(N · K)` path remains the
+    reference).
+  - Cross-tested against the bit-exact path for `eps == 0.0` (must
+    produce **identical** counts and dedup-map shapes — both paths
+    delegate to the same `f32::to_bits`-keyed HashMap on the fast
+    path) and against the brute-force path on noisy fixtures
+    (collapses 9 perturbed copies of a single triangle to 3
+    canonicals at `eps = 1e-5`).
+  - Approximate by design — see `docs/trace-contract.md` §
+    "Spatial-dedup notes" for the exact contract: every two points
+    the spatial path merges are within `eps` on every axis under
+    the Chebyshev metric, but the spatial path may emit one
+    additional canonical when borderline points fall into
+    non-adjacent cells.
+  - NaN coordinates land in a sentinel cell so each NaN takes its
+    own canonical slot, matching the well-defined NaN handling of
+    the brute-force + bit-exact paths.
+  - Negative / non-finite `eps` clamps to zero; `eps == 0.0` short-
+    circuits to the bit-exact branch.
+
 - Round 5 — ASCII-mode parity test for `apply_pre_encode_extras`.
   - New `tests/ascii_apply_pre_encode_extras.rs` mirrors the
     round-4 binary suite against `StlEncoder::new_ascii`. The hook

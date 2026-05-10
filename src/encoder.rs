@@ -75,6 +75,39 @@ impl EncodeStats {
             unique_vertices,
         }
     }
+
+    /// Spatial-index variant of [`Self::with_tolerance`]: bins each
+    /// emitted vertex into a uniform-grid hash with cell size
+    /// `eps × 2` and merges within-tolerance neighbours via a
+    /// 27-cell scan. Amortises to `O(N)` for typical geometry where
+    /// the brute-force [`StlEncoder::unique_vertices_with_tolerance`]
+    /// path is `O(N · K)`.
+    ///
+    /// The shape of the returned [`EncodeStats`] is identical to
+    /// [`Self::with_tolerance`]: `triangles` and `emitted_vertices`
+    /// come from the bit-exact pass; only `unique_vertices` reflects
+    /// the tolerance scan. With `eps == 0.0` (or any negative /
+    /// non-finite `eps`, both clamped to zero) the spatial path
+    /// short-circuits to the bit-exact `f32` rule and produces the
+    /// identical count [`StlEncoder::stats`] would.
+    ///
+    /// **Approximate by design.** The spatial path may emit one
+    /// additional canonical when two genuinely-within-`eps` points
+    /// fall into non-adjacent cells (rare with the `eps × 2` cell
+    /// size + 27-cell scan; impossible when both points coincide
+    /// within a single cell). Two points the spatial path *does*
+    /// merge are guaranteed to be within `eps` on every axis under
+    /// the Chebyshev metric. See `docs/trace-contract.md` §
+    /// "Spatial-dedup notes".
+    pub fn with_tolerance_spatial(scene: &Scene3D, eps: f32) -> Self {
+        let bit_exact = compute_stats(scene);
+        let (unique_vertices, _) = unique_vertices_with_tolerance_spatial(scene, eps);
+        Self {
+            triangles: bit_exact.triangles,
+            emitted_vertices: bit_exact.emitted_vertices,
+            unique_vertices,
+        }
+    }
 }
 
 // The encode pass itself is pure-functional on `&Scene3D`. Auto-
@@ -272,6 +305,32 @@ impl StlEncoder {
     pub fn unique_vertices_with_tolerance(scene: &Scene3D, eps: f32) -> (usize, Vec<usize>) {
         unique_vertices_with_tolerance(scene, eps)
     }
+
+    /// Spatial-grid variant of [`Self::unique_vertices_with_tolerance`].
+    ///
+    /// Builds a uniform-grid hash with cell size `eps × 2` and walks
+    /// every emitted vertex once, scanning 27 neighbouring cells (the
+    /// vertex's own cell plus the 26 surrounding it) for an existing
+    /// canonical within `eps` on every axis. Amortises to `O(N)` for
+    /// typical geometry.
+    ///
+    /// Returns `(unique_count, dedup_map)` with the same shape as the
+    /// brute-force path. With `eps == 0.0` (or any negative /
+    /// non-finite `eps`, both clamped to zero) the spatial path
+    /// short-circuits to the bit-exact `f32` rule, producing the
+    /// **identical** result the `eps == 0` brute-force path returns.
+    ///
+    /// For `eps > 0` the spatial path is **approximate** — see
+    /// [`EncodeStats::with_tolerance_spatial`] for the exact
+    /// contract. Geometry-heavy callers that need an exact answer
+    /// should reach for the brute-force path or commit to a kd-tree
+    /// in their own pipeline.
+    pub fn unique_vertices_with_tolerance_spatial(
+        scene: &Scene3D,
+        eps: f32,
+    ) -> (usize, Vec<usize>) {
+        unique_vertices_with_tolerance_spatial(scene, eps)
+    }
 }
 
 /// Walk every `Triangles` primitive in `scene` and compute the
@@ -411,6 +470,137 @@ pub(crate) fn unique_vertices_with_tolerance(scene: &Scene3D, eps: f32) -> (usiz
                 let new_slot = canonicals.len();
                 canonicals.push(p);
                 dedup_map.push(new_slot);
+            }
+        }
+    });
+    (canonicals.len(), dedup_map)
+}
+
+/// Spatial-grid variant of [`unique_vertices_with_tolerance`].
+///
+/// Bins each emitted vertex into a uniform-grid cell of side
+/// `eps × 2` and scans the 27 cells centred on that bin (i.e. its own
+/// cell plus the 26 surrounding it, indexed by integer triple
+/// `(cx + dx, cy + dy, cz + dz)` for `dx, dy, dz ∈ {-1, 0, 1}`) for
+/// an already-canonical vertex within `eps` on every axis. With cell
+/// size `2 · eps`, two vertices within `eps` on every axis can fall
+/// at most one cell apart on each axis, so the 27-cell scan is
+/// sufficient to guarantee that any candidate canonical the
+/// brute-force path would consider lives in one of the inspected
+/// cells. (The spatial path may still emit one **additional**
+/// canonical when two genuinely-within-`eps` points fall into
+/// non-adjacent cells via the canonical-vs-incoming asymmetry — see
+/// the doc on [`StlEncoder::unique_vertices_with_tolerance_spatial`]
+/// for the exact contract.)
+///
+/// Returns `(unique_count, dedup_map)` with the same shape as the
+/// brute-force path. With `eps == 0.0` (or any negative /
+/// non-finite eps, both clamped) we delegate straight to the bit-
+/// exact branch of [`unique_vertices_with_tolerance`] so the
+/// `eps == 0` results match exactly.
+pub(crate) fn unique_vertices_with_tolerance_spatial(
+    scene: &Scene3D,
+    eps: f32,
+) -> (usize, Vec<usize>) {
+    // Negative / non-finite eps: clamp to bit-exact behaviour so the
+    // spatial path inherits the same garbage-eps tolerance as the
+    // brute-force path. With eps == 0.0 the cell-size formula
+    // (eps × 2) collapses to zero, which is meaningless for spatial
+    // binning — fall through to the brute-force fast path which
+    // already handles the bit-exact case via a HashMap on `to_bits()`
+    // tuples.
+    let eps = if eps.is_finite() && eps >= 0.0 {
+        eps
+    } else {
+        0.0
+    };
+    if eps == 0.0 {
+        return unique_vertices_with_tolerance(scene, 0.0);
+    }
+
+    use std::collections::HashMap;
+
+    let bit_exact = compute_stats(scene);
+    let mut dedup_map: Vec<usize> = Vec::with_capacity(bit_exact.emitted_vertices);
+    let mut canonicals: Vec<[f32; 3]> = Vec::new();
+    // Cell size is `eps × 2` so two within-eps points can differ by
+    // at most one bin index on each axis (covered by the 27-cell
+    // neighbour scan below).
+    let cell = eps * 2.0;
+    // (cx, cy, cz) -> Vec<canonical_slot> for every cell that has at
+    // least one canonical vertex. Vec<usize> rather than `usize`
+    // because two canonicals can land in the same cell when their
+    // mutual distance exceeds eps but they happen to bin together
+    // (the cell is `2·eps` wide, so this is possible).
+    let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+
+    fn bin(v: f32, cell: f32) -> i32 {
+        // Non-finite (NaN, ±Inf) → fall back to a sentinel cell so
+        // each NaN takes its own canonical (mirrors the bit-exact
+        // path's NaN-as-distinct contract). We pick i32::MIN +
+        // distinct offsets per channel to make NaN-NaN collisions
+        // vanishingly unlikely without paying for a separate code
+        // path.
+        if !v.is_finite() {
+            return i32::MIN;
+        }
+        // Saturate at the i32 range to keep the bin index in-range
+        // for absurdly large coordinates. Real-world STL geometry
+        // sits well inside the f32 sweet spot, so this is purely
+        // defence-in-depth.
+        let raw = (v / cell).floor();
+        if raw >= i32::MAX as f32 {
+            i32::MAX
+        } else if raw <= i32::MIN as f32 {
+            i32::MIN
+        } else {
+            raw as i32
+        }
+    }
+
+    for_each_emitted_vertex(scene, |p| {
+        let cx = bin(p[0], cell);
+        let cy = bin(p[1], cell);
+        let cz = bin(p[2], cell);
+
+        // Scan the 27 neighbouring cells (own cell + 26 around) for
+        // an existing canonical within tolerance.
+        let mut found: Option<usize> = None;
+        'outer: for dx in -1..=1i32 {
+            for dy in -1..=1i32 {
+                for dz in -1..=1i32 {
+                    let key = (
+                        cx.saturating_add(dx),
+                        cy.saturating_add(dy),
+                        cz.saturating_add(dz),
+                    );
+                    if let Some(slots) = grid.get(&key) {
+                        for &slot in slots {
+                            let c = canonicals[slot];
+                            // Component-wise within eps on each axis.
+                            // NaN propagation matches the brute-force
+                            // path: any NaN ⇒ NaN ⇒ comparison false ⇒
+                            // each NaN ends up as its own canonical.
+                            if (p[0] - c[0]).abs() <= eps
+                                && (p[1] - c[1]).abs() <= eps
+                                && (p[2] - c[2]).abs() <= eps
+                            {
+                                found = Some(slot);
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        match found {
+            Some(slot) => dedup_map.push(slot),
+            None => {
+                let slot = canonicals.len();
+                canonicals.push(p);
+                grid.entry((cx, cy, cz)).or_default().push(slot);
+                dedup_map.push(slot);
             }
         }
     });
