@@ -184,12 +184,14 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
         weights: None,
         indices: None,
         material: None,
+        targets: Vec::new(),
         extras: prim_extras,
     };
 
     let mesh = Mesh {
         name: None,
         primitives: vec![primitive],
+        weights: Vec::new(),
     };
 
     let mut scene = Scene3D::new();

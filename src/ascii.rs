@@ -180,12 +180,14 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
             weights: None,
             indices: None,
             material: None,
+            targets: Vec::new(),
             extras: prim_extras,
         };
 
         let mesh = Mesh {
             name: name.filter(|s| !s.is_empty()),
             primitives: vec![primitive],
+            weights: Vec::new(),
         };
         let mesh_id = scene.add_mesh(mesh);
         let mut node = Node::new();
@@ -591,8 +593,10 @@ mod tests {
                 weights: None,
                 indices: None,
                 material: None,
+                targets: Vec::new(),
                 extras: HashMap::new(),
             }],
+            weights: Vec::new(),
         };
         s.add_mesh(mesh);
         let out = encode(&s).unwrap();

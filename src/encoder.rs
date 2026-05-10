@@ -719,8 +719,10 @@ mod tests {
                 weights: None,
                 indices: Some(Indices::U32(indices)),
                 material: None,
+                targets: Vec::new(),
                 extras: HashMap::new(),
             }],
+            weights: Vec::new(),
         };
         let mut scene = Scene3D::new();
         let mid = scene.add_mesh(mesh);
@@ -772,6 +774,7 @@ mod tests {
             weights: None,
             indices: None,
             material: None,
+            targets: Vec::new(),
             extras: HashMap::new(),
         };
         // Repeat the triangle three times — same positions, three
@@ -781,6 +784,7 @@ mod tests {
         let mesh = Mesh {
             name: None,
             primitives: vec![prim],
+            weights: Vec::new(),
         };
         let mut scene = Scene3D::new();
         scene.add_mesh(mesh);
