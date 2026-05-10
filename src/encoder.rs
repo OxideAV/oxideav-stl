@@ -77,10 +77,12 @@ impl EncodeStats {
     }
 }
 
-// (No auto-injected extras key for unique-vertex count — the encode
-//  contract stays pure-functional. Callers that want the dedup
-//  metadata read it explicitly via `StlEncoder::stats(&scene)` and
-//  attach it to wherever their pipeline routes diagnostics.)
+// The encode pass itself is pure-functional on `&Scene3D`. Auto-
+// injection of the unique-vertex-count extras
+// (`stl:unique_vertex_count`) lives behind a separate
+// `StlEncoder::apply_pre_encode_extras(&mut scene)` hook so callers
+// who want the metadata stamped opt in explicitly — see
+// `StlEncoder::with_auto_inject_unique_count`.
 
 /// Output flavour for [`StlEncoder`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,11 +94,31 @@ pub enum StlFormat {
     Ascii,
 }
 
+/// Extras key under which the auto-injected unique-vertex count
+/// surfaces on `Primitive::extras` when an [`StlEncoder`] is
+/// configured with [`StlEncoder::with_auto_inject_unique_count(true)`]
+/// and the scene's [`EncodeStats::share_factor`] exceeds the
+/// [`AUTO_INJECT_SHARE_FACTOR_THRESHOLD`].
+///
+/// Round-trip note — STL has no native vertex sharing, so the
+/// decoder leaves any pre-existing value of this key alone (it's
+/// metadata for downstream tooling, not part of the bytestream).
+pub const UNIQUE_VERTEX_COUNT_EXTRAS_KEY: &str = "stl:unique_vertex_count";
+
+/// Default share-factor threshold above which
+/// [`StlEncoder::apply_pre_encode_extras`] auto-injects the
+/// [`UNIQUE_VERTEX_COUNT_EXTRAS_KEY`] extras. Picked so a fully-
+/// shared cube (share_factor = 4.5) trips the heuristic comfortably
+/// while a duplicate-free triangle stream (share_factor = 1.0) does
+/// not.
+pub const AUTO_INJECT_SHARE_FACTOR_THRESHOLD: f32 = 1.5;
+
 /// STL encoder — implements [`Mesh3DEncoder`].
 #[derive(Debug)]
 pub struct StlEncoder {
     format: StlFormat,
     ascii_opts: EncodeOptions,
+    auto_inject_unique_count: bool,
 }
 
 impl StlEncoder {
@@ -105,6 +127,7 @@ impl StlEncoder {
         Self {
             format: StlFormat::Binary,
             ascii_opts: EncodeOptions::default(),
+            auto_inject_unique_count: false,
         }
     }
 
@@ -113,6 +136,7 @@ impl StlEncoder {
         Self {
             format: StlFormat::Ascii,
             ascii_opts: EncodeOptions::default(),
+            auto_inject_unique_count: false,
         }
     }
 
@@ -121,6 +145,7 @@ impl StlEncoder {
         Self {
             format,
             ascii_opts: EncodeOptions::default(),
+            auto_inject_unique_count: false,
         }
     }
 
@@ -144,6 +169,79 @@ impl StlEncoder {
     /// Output flavour this encoder will produce.
     pub fn format(&self) -> StlFormat {
         self.format
+    }
+
+    /// Toggle the [`UNIQUE_VERTEX_COUNT_EXTRAS_KEY`] auto-injection
+    /// hook. When enabled, [`Self::apply_pre_encode_extras`] will
+    /// stamp the bit-exact unique-vertex count into
+    /// `Primitive::extras` for any scene whose
+    /// [`EncodeStats::share_factor`] exceeds
+    /// [`AUTO_INJECT_SHARE_FACTOR_THRESHOLD`].
+    ///
+    /// The hook fires only when the caller invokes
+    /// [`Self::apply_pre_encode_extras`] explicitly — the standard
+    /// [`Mesh3DEncoder::encode`] path takes `&Scene3D` and stays
+    /// pure-functional, so we cannot mutate the scene during the
+    /// emit pass. Pre-emit invocation is a one-line ceremony:
+    ///
+    /// ```text
+    /// let mut enc = StlEncoder::new_binary().with_auto_inject_unique_count(true);
+    /// enc.apply_pre_encode_extras(&mut scene);
+    /// let bytes = enc.encode(&scene)?;
+    /// ```
+    ///
+    /// Disabled by default — auto-injection is opt-in observability.
+    pub fn with_auto_inject_unique_count(mut self, enabled: bool) -> Self {
+        self.auto_inject_unique_count = enabled;
+        self
+    }
+
+    /// Whether [`Self::apply_pre_encode_extras`] is configured to
+    /// auto-inject the unique-vertex count.
+    pub fn auto_inject_unique_count(&self) -> bool {
+        self.auto_inject_unique_count
+    }
+
+    /// Apply this encoder's auto-injection hooks to `scene` before a
+    /// subsequent [`Mesh3DEncoder::encode`] call.
+    ///
+    /// Currently the only hook is the unique-vertex-count extras
+    /// stamper enabled via [`Self::with_auto_inject_unique_count`].
+    /// When that toggle is on AND the scene's bit-exact
+    /// [`EncodeStats::share_factor`] exceeds
+    /// [`AUTO_INJECT_SHARE_FACTOR_THRESHOLD`], every primitive whose
+    /// vertex stream contributed to the count gets a
+    /// [`UNIQUE_VERTEX_COUNT_EXTRAS_KEY`] entry on
+    /// `Primitive::extras` (the bit-exact count from
+    /// [`StlEncoder::stats`], serialised as a `serde_json::Value`
+    /// integer).
+    ///
+    /// No-op when the toggle is off or the scene's share factor is
+    /// at-or-below threshold. Idempotent — re-running the hook on a
+    /// scene that already carries the key overwrites with the
+    /// freshly-recomputed count.
+    pub fn apply_pre_encode_extras(&self, scene: &mut Scene3D) {
+        if !self.auto_inject_unique_count {
+            return;
+        }
+        let stats = compute_stats(scene);
+        if stats.share_factor() <= AUTO_INJECT_SHARE_FACTOR_THRESHOLD {
+            return;
+        }
+        // Stamp the bit-exact count on every primitive whose topology
+        // would actually be emitted (Triangles only — non-Triangles
+        // primitives are rejected at encode-time, so injecting the
+        // key on them would be misleading).
+        let value = serde_json::Value::from(stats.unique_vertices as u64);
+        for mesh in &mut scene.meshes {
+            for prim in &mut mesh.primitives {
+                if prim.topology != Topology::Triangles {
+                    continue;
+                }
+                prim.extras
+                    .insert(UNIQUE_VERTEX_COUNT_EXTRAS_KEY.to_string(), value.clone());
+            }
+        }
     }
 
     /// Compute pre-encode statistics on `scene` without materialising

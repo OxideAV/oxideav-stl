@@ -119,6 +119,26 @@ bit-exact path. The scan is `O(N · K)` where `K` is the running
 canonical count — fine for diagnostic use; large-mesh callers should
 spatially index upstream.
 
+## Auto-inject `stl:unique_vertex_count`
+
+Opt-in encoder hook that stamps the bit-exact unique-vertex count onto
+every triangle primitive's `Primitive::extras["stl:unique_vertex_count"]`
+*before* emit, gated on the scene's `share_factor()` exceeding `1.5`
+(the `AUTO_INJECT_SHARE_FACTOR_THRESHOLD` constant). The standard
+`encode()` pass takes `&Scene3D` and stays pure-functional; callers
+opt in via a separate one-line hook:
+
+```text
+let mut enc = StlEncoder::new_binary().with_auto_inject_unique_count(true);
+enc.apply_pre_encode_extras(&mut scene);
+let bytes = enc.encode(&scene)?;
+```
+
+The decoder leaves the key alone — STL has no native vertex sharing,
+so the value is metadata for downstream tooling, not part of the byte
+stream. Re-running the hook on a scene that already carries the key
+overwrites with a freshly-recomputed count.
+
 ## 16-bit per-face colour
 
 The binary STL `uint16` attribute slot (spec-defined as zero) is

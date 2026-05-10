@@ -49,7 +49,9 @@ pub mod trace;
 pub use ascii::EncodeOptions as AsciiEncodeOptions;
 pub use color::{detect as detect_color_convention, ColorConvention, Stl16BitColor};
 pub use decoder::StlDecoder;
-pub use encoder::{EncodeStats, StlEncoder};
+pub use encoder::{
+    EncodeStats, StlEncoder, AUTO_INJECT_SHARE_FACTOR_THRESHOLD, UNIQUE_VERTEX_COUNT_EXTRAS_KEY,
+};
 
 /// Format-id string used in the [`Mesh3DRegistry`](oxideav_mesh3d::Mesh3DRegistry).
 pub const FORMAT_ID: &str = "stl";

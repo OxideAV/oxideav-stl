@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 4 — opt-in auto-injection of `stl:unique_vertex_count` extras.
+  - New `StlEncoder::with_auto_inject_unique_count(bool)` setter +
+    `auto_inject_unique_count()` accessor.
+  - New `StlEncoder::apply_pre_encode_extras(&mut scene)` hook that,
+    when the toggle is on AND `EncodeStats::share_factor() > 1.5`
+    (the public `AUTO_INJECT_SHARE_FACTOR_THRESHOLD` constant),
+    stamps every Triangles primitive's
+    `Primitive::extras["stl:unique_vertex_count"]` (also re-exported
+    as `UNIQUE_VERTEX_COUNT_EXTRAS_KEY`) with the bit-exact count
+    from `StlEncoder::stats`. Idempotent; non-Triangles primitives
+    are skipped.
+  - The `Mesh3DEncoder::encode` pass remains pure-functional on
+    `&Scene3D`; callers invoke the hook explicitly between
+    configure-and-emit because the trait signature cannot mutate
+    the scene during the emit pass.
+  - Decoder leaves the key alone — STL has no native vertex sharing,
+    so the value is metadata only.
+
 - Round 4 — tolerance-based vertex dedup helpers.
   - New `EncodeStats::with_tolerance(&scene, eps)` builds an
     `EncodeStats` whose `unique_vertices` field reflects ε-equality
