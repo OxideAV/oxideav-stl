@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 7 — mesh topology utilities (`oxideav_stl::topology`).
+  - New `shells(&scene) -> Vec<Shell>` splits the triangle soup into
+    its connected components via BFS over bit-exact shared vertex
+    positions. Each `Shell { face_indices, vertices, edges, faces,
+    boundary_edges, non_manifold_edges }` carries the per-shell
+    V/E/F counts plus the in-shell edge-use breakdown.
+  - `Shell::euler_characteristic() -> i64` returns χ = V − E + F;
+    `Shell::is_closed_manifold()` reports whether every edge appears
+    in exactly two triangles within the shell; `Shell::genus()`
+    estimates the genus for closed orientable shells via
+    `g = (2 − χ) / 2`. Returns `None` when the shell is not closed-
+    manifold or the formula does not apply (odd numerator).
+  - `repair_weld_vertices(&mut scene) -> WeldReport` rewrites every
+    `Triangles` primitive to use a shared `Indices::U32` buffer
+    keyed on bit-exact `f32` positions; non-`Triangles` primitives
+    are left untouched. `WeldReport { triangles_inspected,
+    slots_collapsed, positions_collapsed, degenerate_triangles }` —
+    `positions_collapsed == 0` is the idempotency signal (the pass
+    actually changed something iff it's > 0); `slots_collapsed`
+    remains the gross emit-vs-canonical ratio for tooling.
+  - Re-exported at the crate root as `shells`,
+    `repair_weld_vertices`, `Shell`, `TopologyFaceLocator`, and
+    `WeldReport`. The locator type is module-local rather than
+    sharing `validate::FaceLocator` so `topology` is usable
+    standalone.
+
+- Round 7 — ASCII comment-line tolerance (vendor quirk).
+  - The ASCII parser and the ASCII-vs-binary sniffer now treat
+    whole-line `;`-introduced and `#`-introduced comments as
+    whitespace. Hand-edited STL files and a handful of vintage CAD
+    exporters annotate their output with these; the 1989 spec
+    defines no comment syntax, but the dominant real-world tolerance
+    is to skip them silently.
+  - Comments are recognised only at token boundaries (i.e. after
+    whitespace has been consumed); inline comments mid-token are
+    NOT tolerated so the syntax cannot conflate with `vertex` /
+    `facet` / numeral tokens.
+  - Both the prefix sniff (`is_ascii_stl`) and the parser's
+    `skip_ws` share the same comment-aware whitespace skipper, so a
+    file starting with `; …\n solid …` classifies as ASCII and
+    parses cleanly end-to-end.
+
 ## [0.0.1](https://github.com/OxideAV/oxideav-stl/compare/v0.0.0...v0.0.1) - 2026-05-10
 
 ### Other

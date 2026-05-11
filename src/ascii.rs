@@ -23,6 +23,20 @@
 //!
 //! The `<name>` after `solid` and `endsolid` is optional; we
 //! preserve it on the parsed [`Mesh::name`] when present.
+//!
+//! ## Comment-line tolerance (vendor quirk, r7)
+//!
+//! Some hand-edited ASCII STL files (and a handful of vintage CAD
+//! exporters) prepend a `;`-introduced line comment to the file
+//! header or interleave comments between `endfacet` and the next
+//! `facet`. The 1989 spec defines no comment syntax, but the dominant
+//! real-world tolerance is to skip whole-line comments starting with
+//! `;` (sometimes `#`). We accept both characters as line-comment
+//! introducers; the rest of the line up to the next `\n` is silently
+//! discarded. Inline comments mid-token are NOT tolerated — that
+//! would conflict with token-recognition for `solid` / `facet` /
+//! `vertex` and would silently change the meaning of legitimate
+//! numerals when an editor inserted a `;` at the wrong column.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -454,13 +468,33 @@ impl<'a> Parser<'a> {
         self.pos >= self.src.len()
     }
 
-    /// Skip ASCII whitespace including newlines + tabs.
+    /// Skip ASCII whitespace including newlines + tabs, AND
+    /// whole-line `;`/`#`-introduced comments. A comment runs from
+    /// the introducer up to the next `\n` (or EOF); the introducer
+    /// itself is only recognised at a position where the parser
+    /// would otherwise expect a fresh token (i.e. after whitespace
+    /// has been consumed), so the syntax has no chance of conflating
+    /// with `vertex` / `facet` / coordinate-numeral tokens.
     fn skip_ws(&mut self) {
         let bytes = self.src.as_bytes();
-        while self.pos < bytes.len() {
-            let b = bytes[self.pos];
-            if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' {
-                self.pos += 1;
+        loop {
+            // First: regular whitespace.
+            while self.pos < bytes.len() {
+                let b = bytes[self.pos];
+                if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            // Then: if the next byte introduces a line comment, eat
+            // the rest of the line and loop back for any trailing
+            // whitespace + further comments. Otherwise we're at a
+            // real token and bail.
+            if self.pos < bytes.len() && (bytes[self.pos] == b';' || bytes[self.pos] == b'#') {
+                while self.pos < bytes.len() && bytes[self.pos] != b'\n' {
+                    self.pos += 1;
+                }
             } else {
                 break;
             }

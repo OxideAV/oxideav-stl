@@ -255,6 +255,68 @@ covering every `Triangles` vertex (non-finite coordinates skipped);
 the scene's node-graph transforms are not applied — STL produces
 identity-transform single-mesh trees in practice.
 
+## Topology utilities
+
+Opt-in, non-mutating analysis of the triangle soup lives in
+`oxideav_stl::topology`. Two utilities + one mutating repair:
+
+```rust
+use oxideav_stl::{repair_weld_vertices, shells};
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+// Connected components (bit-exact shared-vertex BFS).
+for shell in shells(&scene) {
+    if shell.is_closed_manifold() {
+        eprintln!(
+            "closed shell: V={} E={} F={} chi={} genus={:?}",
+            shell.vertices,
+            shell.edges,
+            shell.faces,
+            shell.euler_characteristic(),
+            shell.genus(),
+        );
+    } else {
+        eprintln!(
+            "open shell: {} boundary edges",
+            shell.boundary_edges
+        );
+    }
+}
+
+// Trivial bit-exact weld — collapses an unindexed triangle soup
+// into a shared `Indices::U32` buffer. Returns a `WeldReport` whose
+// `positions_collapsed == 0` is the idempotency signal.
+let report = repair_weld_vertices(&mut scene);
+```
+
+`shells` uses **shared-vertex** adjacency (any single corner
+position match links two triangles into the same shell) — more
+permissive than edge-adjacency to catch CSG-style corner-touching
+geometry. Vertex equality uses bit-exact `f32` matching; corners
+that differ by floating-point noise should be pre-deduplicated via
+`StlEncoder::unique_vertices_with_tolerance_spatial`.
+
+`repair_weld_vertices` only mutates `prim.positions` /
+`prim.normals` / `prim.indices` on `Triangles` primitives;
+`prim.extras`, `mesh.name`, and the scene-graph `nodes` / `roots`
+structure are preserved. Degenerate triangles (post-weld, any two
+indices coincide) are reported via `WeldReport.degenerate_triangles`
+but NOT removed — callers post-process if they want them dropped.
+
+## ASCII comment-line tolerance
+
+Whole-line `;`-introduced and `#`-introduced comments are silently
+skipped at token boundaries, matching the dominant real-world
+tolerance for hand-edited STL files and a handful of vintage CAD
+exporters. The 1989 spec defines no comment syntax; we treat both
+characters as line-comment introducers and discard the rest of the
+line up to the next `\n`. Inline comments mid-token are NOT
+tolerated — that would conflict with `vertex` / `facet` / numeral
+recognition.
+
+The ASCII-vs-binary sniffer applies the same rule, so a file
+starting with `; …\nsolid …` classifies as ASCII end-to-end.
+
 ## Trace tape (cross-impl audit)
 
 With the `trace` Cargo feature enabled and `OXIDEAV_STL_TRACE_FILE`

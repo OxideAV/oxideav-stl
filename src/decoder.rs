@@ -98,18 +98,32 @@ pub(crate) fn is_ascii_stl(bytes: &[u8]) -> bool {
     true
 }
 
-/// Skip a leading UTF-8 BOM and ASCII whitespace (`' '`, `'\t'`,
-/// `'\r'`, `'\n'`). Returns the suffix that remains.
+/// Skip a leading UTF-8 BOM, ASCII whitespace (`' '`, `'\t'`,
+/// `'\r'`, `'\n'`), and whole-line `;`/`#`-introduced comments.
+/// Returns the suffix that remains. Matches the parser's
+/// `skip_ws` rule so the sniffer and parser agree on what counts
+/// as "before the first real token".
 fn strip_bom_and_leading_ws(bytes: &[u8]) -> &[u8] {
     let mut s = bytes;
     if s.starts_with(UTF8_BOM) {
         s = &s[UTF8_BOM.len()..];
     }
     let mut i = 0;
-    while i < s.len() {
-        let b = s[i];
-        if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' {
-            i += 1;
+    loop {
+        // Whitespace run.
+        while i < s.len() {
+            let b = s[i];
+            if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        // Line-comment run.
+        if i < s.len() && (s[i] == b';' || s[i] == b'#') {
+            while i < s.len() && s[i] != b'\n' {
+                i += 1;
+            }
         } else {
             break;
         }

@@ -43,6 +43,7 @@ pub mod color;
 pub mod decoder;
 pub mod encoder;
 pub(crate) mod materialise_header;
+pub mod topology;
 #[cfg(feature = "trace")]
 pub mod trace;
 pub mod validate;
@@ -52,6 +53,9 @@ pub use color::{detect as detect_color_convention, ColorConvention, Stl16BitColo
 pub use decoder::StlDecoder;
 pub use encoder::{
     EncodeStats, StlEncoder, AUTO_INJECT_SHARE_FACTOR_THRESHOLD, UNIQUE_VERTEX_COUNT_EXTRAS_KEY,
+};
+pub use topology::{
+    repair_weld_vertices, shells, FaceLocator as TopologyFaceLocator, Shell, WeldReport,
 };
 pub use validate::{
     bbox, validate, Bbox, FaceLocator, ValidationOptions, ValidationReport,
