@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-stl/compare/v0.0.1...v0.0.2) - 2026-05-11
+
+### Other
+
+- Round 7 — topology utilities + ASCII comment-line tolerance
+
 ### Added
 
 - Round 7 — mesh topology utilities (`oxideav_stl::topology`).
