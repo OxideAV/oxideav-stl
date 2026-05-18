@@ -55,7 +55,9 @@ pub use encoder::{
     EncodeStats, StlEncoder, AUTO_INJECT_SHARE_FACTOR_THRESHOLD, UNIQUE_VERTEX_COUNT_EXTRAS_KEY,
 };
 pub use topology::{
-    repair_weld_vertices, shells, FaceLocator as TopologyFaceLocator, Shell, WeldReport,
+    repair_drop_degenerate_triangles, repair_recompute_zero_normals, repair_weld_vertices, shells,
+    DegenerateDropReport, FaceLocator as TopologyFaceLocator, NormalRecomputeReport, Shell,
+    WeldReport,
 };
 pub use validate::{
     bbox, validate, Bbox, FaceLocator, ValidationOptions, ValidationReport,

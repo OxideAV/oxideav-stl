@@ -20,9 +20,24 @@
 //!    sharing vertices and a CAD pipeline downstream wants a shared
 //!    index buffer back.
 //!
-//! This module owns those three utilities. All are pure-functional;
-//! `repair_weld_vertices` is the only mutating helper and it takes
-//! `&mut Scene3D` explicitly.
+//! This module owns those utilities. All shell / report builders are
+//! pure-functional; the `repair_*` family is the mutating side and
+//! every entry point takes `&mut Scene3D` explicitly.
+//!
+//! ## Repair pipeline order
+//!
+//! The mutating helpers are independent — call any combination in any
+//! order — but the natural pipeline for a freshly-decoded STL scene
+//! (triangle soup, per-vertex normals as 3 copies of the spec'd
+//! per-face value) is:
+//!
+//! 1. [`repair_weld_vertices`] — collapse the soup into a shared index
+//!    buffer (bit-exact `f32` position equality).
+//! 2. [`repair_drop_degenerate_triangles`] — cull post-weld zero-area
+//!    triangles (any two corner indices coincident).
+//! 3. [`repair_recompute_zero_normals`] — fill in face normals for any
+//!    facet whose stored normal is the spec's all-zero "recompute from
+//!    winding" sentinel.
 //!
 //! ## Vertex-equality model
 //!
@@ -416,6 +431,367 @@ fn resolve_face(indices: &Option<Indices>, face_idx: usize) -> (usize, usize, us
     }
 }
 
+/// Outcome of a [`repair_drop_degenerate_triangles`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. A run that finds nothing to drop produces
+/// `dropped_triangles == 0` — the canonical idempotency signal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DegenerateDropReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive.
+    pub triangles_inspected: usize,
+    /// Number of degenerate triangles removed from the scene. Equals
+    /// zero on an already-clean scene.
+    pub dropped_triangles: usize,
+}
+
+/// Remove zero-area triangles in-place from every `Triangles`
+/// primitive.
+///
+/// A triangle is considered degenerate when any two of its three
+/// corner *positions* coincide by bit-exact `f32` match — the same
+/// equality model the rest of the crate uses. Run
+/// [`repair_weld_vertices`] first if your producer emitted the same
+/// logical vertex with multiple slot indices and you want index-based
+/// duplicate detection instead of position-based.
+///
+/// For each touched primitive:
+/// - If `prim.indices` is `Some`, the index buffer is rewritten with
+///   the surviving triangle slots and its `Indices` discriminant is
+///   preserved (`U16` stays `U16`, `U32` stays `U32`).
+/// - If `prim.indices` is `None`, the unindexed `positions` (and
+///   `normals` when present and matched 1:1 in length) are compacted
+///   in place — each surviving triangle's 3 corners (and matching
+///   normals) are copied forward, dropped triangles disappear.
+///
+/// Non-`Triangles` primitives are left untouched. The pass does NOT
+/// alter `prim.extras`, `mesh.name`, or the scene-graph structure.
+///
+/// Returns a single [`DegenerateDropReport`] summed across every
+/// touched primitive.
+///
+/// ## Why position-equality, not zero-cross-product?
+///
+/// The two definitions agree on the common case (a "duplicated
+/// corner" producer bug) but disagree on the "three collinear but
+/// distinct corners" pathology. The collinear case is genuinely
+/// zero-area and can show up after numeric scaling, but dropping it
+/// blind would alter the visible silhouette of CAD-pipeline meshes
+/// that intentionally include hairline strips between thicker
+/// regions. The strict bit-exact rule lets callers run this repair
+/// without that risk; callers who specifically want zero-cross
+/// culling can pre-filter via a manual walk of [`crate::validate`]'s
+/// orientation report.
+pub fn repair_drop_degenerate_triangles(scene: &mut Scene3D) -> DegenerateDropReport {
+    let mut report = DegenerateDropReport::default();
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            drop_degenerate_in_primitive(prim, &mut report);
+        }
+    }
+    report
+}
+
+fn drop_degenerate_in_primitive(prim: &mut Primitive, report: &mut DegenerateDropReport) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    // Decide per-face survival on resolved (position-key) corners so
+    // both indexed and unindexed primitives are judged consistently.
+    let mut keep = Vec::with_capacity(face_count);
+    let mut dropped_local = 0usize;
+    for face_idx in 0..face_count {
+        let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+        let p0 = prim.positions.get(vi0).copied();
+        let p1 = prim.positions.get(vi1).copied();
+        let p2 = prim.positions.get(vi2).copied();
+        let (a, b, c) = match (p0, p1, p2) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            // A face whose index is out of range is silently dropped
+            // — it would crash any downstream consumer anyway, and
+            // counting it as "kept" would mis-balance the report.
+            _ => {
+                dropped_local += 1;
+                keep.push(false);
+                continue;
+            }
+        };
+        let degen = vert_key_eq(a, b) || vert_key_eq(b, c) || vert_key_eq(a, c);
+        if degen {
+            dropped_local += 1;
+            keep.push(false);
+        } else {
+            keep.push(true);
+        }
+    }
+    if dropped_local == 0 {
+        return;
+    }
+    report.dropped_triangles += dropped_local;
+
+    // Rewrite the buffers.
+    let normals_match = prim
+        .normals
+        .as_ref()
+        .map(|ns| ns.len() == prim.positions.len())
+        .unwrap_or(false);
+    match prim.indices.take() {
+        Some(Indices::U16(idx)) => {
+            let mut new_idx = Vec::with_capacity(face_count * 3 - dropped_local * 3);
+            for (face_idx, keep_face) in keep.iter().enumerate() {
+                if !*keep_face {
+                    continue;
+                }
+                let b = face_idx * 3;
+                new_idx.extend_from_slice(&idx[b..b + 3]);
+            }
+            prim.indices = Some(Indices::U16(new_idx));
+        }
+        Some(Indices::U32(idx)) => {
+            let mut new_idx = Vec::with_capacity(face_count * 3 - dropped_local * 3);
+            for (face_idx, keep_face) in keep.iter().enumerate() {
+                if !*keep_face {
+                    continue;
+                }
+                let b = face_idx * 3;
+                new_idx.extend_from_slice(&idx[b..b + 3]);
+            }
+            prim.indices = Some(Indices::U32(new_idx));
+        }
+        None => {
+            // Unindexed: compact positions + (when matched 1:1) normals.
+            let mut new_pos: Vec<[f32; 3]> = Vec::with_capacity(prim.positions.len());
+            let mut new_norms: Vec<[f32; 3]> = if normals_match {
+                Vec::with_capacity(prim.positions.len())
+            } else {
+                Vec::new()
+            };
+            for (face_idx, keep_face) in keep.iter().enumerate() {
+                if !*keep_face {
+                    continue;
+                }
+                let b = face_idx * 3;
+                new_pos.push(prim.positions[b]);
+                new_pos.push(prim.positions[b + 1]);
+                new_pos.push(prim.positions[b + 2]);
+                if normals_match {
+                    if let Some(ns) = prim.normals.as_ref() {
+                        new_norms.push(ns[b]);
+                        new_norms.push(ns[b + 1]);
+                        new_norms.push(ns[b + 2]);
+                    }
+                }
+            }
+            prim.positions = new_pos;
+            if normals_match {
+                prim.normals = Some(new_norms);
+            }
+        }
+    }
+}
+
+fn vert_key_eq(a: [f32; 3], b: [f32; 3]) -> bool {
+    a[0].to_bits() == b[0].to_bits()
+        && a[1].to_bits() == b[1].to_bits()
+        && a[2].to_bits() == b[2].to_bits()
+}
+
+/// Outcome of a [`repair_recompute_zero_normals`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. `recomputed_triangles == 0` is the idempotency signal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NormalRecomputeReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive.
+    pub triangles_inspected: usize,
+    /// Number of triangles whose per-vertex normals were rewritten
+    /// from the right-hand-rule cross product of their positions.
+    pub recomputed_triangles: usize,
+    /// Number of triangles left alone because the recomputed normal
+    /// was below the cross-product epsilon (a true degenerate
+    /// triangle — see [`repair_drop_degenerate_triangles`] to remove
+    /// them).
+    pub skipped_degenerate: usize,
+    /// Number of primitives where a missing `normals` array was
+    /// freshly created and populated. Primitives whose `normals` is
+    /// already `Some(_)` with a length mismatch are left untouched
+    /// and reported under [`Self::skipped_length_mismatch`].
+    pub primitives_populated: usize,
+    /// Number of primitives skipped because their existing `normals`
+    /// length did not match `positions.len()`. Callers that hit this
+    /// likely have a producer bug upstream; the safe action is to
+    /// not silently rewrite the buffer.
+    pub skipped_length_mismatch: usize,
+}
+
+/// Fill in zero-stored ("recompute from winding") triangle normals
+/// from the right-hand-rule cross product of their positions.
+///
+/// Per the STL spec (§6.5 of the Marshall Burns transcription), each
+/// facet's normal must obey the right-hand rule against the vertex
+/// order, but an all-zero stored normal is the spec's documented
+/// sentinel for "the consumer should recompute". Producers
+/// occasionally emit zero normals across the board to mark
+/// "unverified orientation"; this repair walks the scene and
+/// rewrites those triangles in-place.
+///
+/// Per-triangle decision: only triangles whose three *current*
+/// per-vertex normals all have a magnitude `≤ eps` are rewritten.
+/// Triangles where some corners carry non-zero normals and others do
+/// not — a tell that the producer mixed face-normal and vertex-normal
+/// data — are left untouched.
+///
+/// If a primitive's `normals` field is `None`, this routine creates
+/// it sized to match `positions.len()` and populates per-face triples
+/// for every non-degenerate face. Primitives whose existing `normals`
+/// length disagrees with `positions.len()` are skipped and counted
+/// under [`NormalRecomputeReport::skipped_length_mismatch`].
+///
+/// `eps == 0.0` (or any negative / non-finite value, clamped to
+/// `0.0`) means "exact zero only" — the strict spec sentinel rule.
+/// A small positive value (e.g. `1e-6`) catches producers that emit
+/// floating-point-noise-zero normals. The cross-product magnitude is
+/// also compared against `eps` to skip mathematically-degenerate
+/// triangles (counted under
+/// [`NormalRecomputeReport::skipped_degenerate`]).
+///
+/// Non-`Triangles` primitives are left untouched. The pass does NOT
+/// alter `prim.extras`, `mesh.name`, the scene-graph structure, or
+/// any non-normal vertex attribute.
+pub fn repair_recompute_zero_normals(scene: &mut Scene3D, eps: f32) -> NormalRecomputeReport {
+    let mut report = NormalRecomputeReport::default();
+    let eps = if eps.is_finite() && eps > 0.0 {
+        eps
+    } else {
+        0.0
+    };
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            recompute_normals_in_primitive(prim, eps, &mut report);
+        }
+    }
+    report
+}
+
+fn recompute_normals_in_primitive(
+    prim: &mut Primitive,
+    eps: f32,
+    report: &mut NormalRecomputeReport,
+) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    // Ensure normals has the right shape, or skip.
+    let positions_len = prim.positions.len();
+    let needs_populate = match &prim.normals {
+        None => true,
+        Some(ns) if ns.len() != positions_len => {
+            report.skipped_length_mismatch += 1;
+            return;
+        }
+        Some(_) => false,
+    };
+    if needs_populate {
+        prim.normals = Some(vec![[0.0, 0.0, 0.0]; positions_len]);
+        report.primitives_populated += 1;
+    }
+
+    // Reborrow once we know the field is Some.
+    let normals = prim
+        .normals
+        .as_mut()
+        .expect("normals just populated or already Some");
+
+    for face_idx in 0..face_count {
+        let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+        // All three index lookups must succeed. Out-of-range -> skip.
+        let p0 = prim.positions.get(vi0).copied();
+        let p1 = prim.positions.get(vi1).copied();
+        let p2 = prim.positions.get(vi2).copied();
+        let (a, b, c) = match (p0, p1, p2) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => continue,
+        };
+        // Read the current per-vertex normals for this face's three
+        // slots. Triangles with any non-zero stored normal are left
+        // alone — only "all zero" triples are rewritten.
+        let n0 = normals.get(vi0).copied().unwrap_or([0.0; 3]);
+        let n1 = normals.get(vi1).copied().unwrap_or([0.0; 3]);
+        let n2 = normals.get(vi2).copied().unwrap_or([0.0; 3]);
+        if !(normal_is_zero(n0, eps) && normal_is_zero(n1, eps) && normal_is_zero(n2, eps)) {
+            continue;
+        }
+        let recomputed = recompute_face_normal(a, b, c, eps);
+        match recomputed {
+            Some(n) => {
+                // Per-face normal duplicated across the three vertex
+                // slots, matching the rest of the crate's convention.
+                if let Some(slot) = normals.get_mut(vi0) {
+                    *slot = n;
+                }
+                if let Some(slot) = normals.get_mut(vi1) {
+                    *slot = n;
+                }
+                if let Some(slot) = normals.get_mut(vi2) {
+                    *slot = n;
+                }
+                report.recomputed_triangles += 1;
+            }
+            None => {
+                report.skipped_degenerate += 1;
+            }
+        }
+    }
+}
+
+fn normal_is_zero(n: [f32; 3], eps: f32) -> bool {
+    // Component-wise absolute check against `eps`. The encoder + the
+    // validate module treat an all-zero triple as the spec sentinel,
+    // and that's what we recover here; a small positive `eps` widens
+    // it to catch float-noise zeros.
+    n[0].abs() <= eps && n[1].abs() <= eps && n[2].abs() <= eps
+}
+
+fn recompute_face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3], eps: f32) -> Option<[f32; 3]> {
+    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let cx = u[1] * v[2] - u[2] * v[1];
+    let cy = u[2] * v[0] - u[0] * v[2];
+    let cz = u[0] * v[1] - u[1] * v[0];
+    let len = (cx * cx + cy * cy + cz * cz).sqrt();
+    // For `eps == 0.0`, the only rejection is a numerically-exact
+    // zero cross product (collinear or coincident corners). For
+    // positive `eps`, any cross-product magnitude at or below `eps`
+    // counts as "degenerate" — same threshold semantics the
+    // zero-normal detection uses.
+    let threshold = eps.max(f32::EPSILON);
+    if len.is_finite() && len > threshold {
+        Some([cx / len, cy / len, cz / len])
+    } else {
+        None
+    }
+}
+
 /// Internal collected-triangle representation used by [`shells`].
 struct CollectedTri {
     locator: FaceLocator,
@@ -671,5 +1047,300 @@ mod tests {
         assert_eq!(r.triangles_inspected, 0);
         // Indices remain None.
         assert!(scene.meshes[0].primitives[0].indices.is_none());
+    }
+
+    // ----- repair_drop_degenerate_triangles -----
+
+    #[test]
+    fn drop_degenerate_unindexed_compacts_in_place() {
+        // Two unindexed triangles: one healthy, one with two
+        // coincident corners. The pass keeps the healthy one and
+        // drops the degenerate one.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            // Healthy triangle.
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            // Degenerate: 1st and 2nd corner identical.
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 1.0, 0.0],
+        ];
+        prim.normals = Some(vec![
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_drop_degenerate_triangles(&mut scene);
+        assert_eq!(r.triangles_inspected, 2);
+        assert_eq!(r.dropped_triangles, 1);
+        let p = &scene.meshes[0].primitives[0];
+        assert_eq!(p.positions.len(), 3);
+        assert_eq!(p.positions[0], [0.0, 0.0, 0.0]);
+        assert_eq!(p.positions[1], [1.0, 0.0, 0.0]);
+        assert_eq!(p.positions[2], [0.0, 1.0, 0.0]);
+        let ns = p.normals.as_ref().expect("normals preserved");
+        assert_eq!(ns.len(), 3);
+        assert_eq!(ns[0], [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn drop_degenerate_indexed_u32_rewrites_index_buffer() {
+        // Three faces in a shared-vertex index buffer; face 1 has
+        // two identical corner indices (canonical post-weld degenerate).
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        prim.indices = Some(Indices::U32(vec![
+            0, 1, 2, // healthy
+            0, 0, 3, // degenerate (idx 0 twice)
+            1, 2, 3, // healthy
+        ]));
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_drop_degenerate_triangles(&mut scene);
+        assert_eq!(r.triangles_inspected, 3);
+        assert_eq!(r.dropped_triangles, 1);
+        let p = &scene.meshes[0].primitives[0];
+        // Positions are untouched on an indexed primitive.
+        assert_eq!(p.positions.len(), 4);
+        match &p.indices {
+            Some(Indices::U32(idx)) => assert_eq!(idx, &vec![0, 1, 2, 1, 2, 3]),
+            _ => panic!("U32 discriminant must be preserved"),
+        }
+    }
+
+    #[test]
+    fn drop_degenerate_indexed_u16_preserves_discriminant() {
+        // Same test as U32 path but the input index buffer is U16.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        prim.indices = Some(Indices::U16(vec![0, 1, 2, 0, 0, 3, 1, 2, 3]));
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_drop_degenerate_triangles(&mut scene);
+        assert_eq!(r.dropped_triangles, 1);
+        match &scene.meshes[0].primitives[0].indices {
+            Some(Indices::U16(idx)) => assert_eq!(idx, &vec![0u16, 1, 2, 1, 2, 3]),
+            _ => panic!("U16 discriminant must be preserved"),
+        }
+    }
+
+    #[test]
+    fn drop_degenerate_idempotent_on_clean_scene() {
+        let mut scene = scene_with_primitives(vec![unit_cube_soup_primitive()]);
+        let r1 = repair_drop_degenerate_triangles(&mut scene);
+        let r2 = repair_drop_degenerate_triangles(&mut scene);
+        assert_eq!(r1.triangles_inspected, 12);
+        assert_eq!(r1.dropped_triangles, 0);
+        assert_eq!(r2.dropped_triangles, 0);
+    }
+
+    #[test]
+    fn drop_degenerate_skips_non_triangles() {
+        let mut prim = Primitive::new(Topology::Lines);
+        prim.positions = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_drop_degenerate_triangles(&mut scene);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.dropped_triangles, 0);
+        // Positions untouched.
+        assert_eq!(scene.meshes[0].primitives[0].positions.len(), 2);
+    }
+
+    #[test]
+    fn drop_degenerate_composes_with_weld() {
+        // Producer emits the canonical "two coincident corners
+        // hidden as three distinct slot indices" bug. Weld collapses
+        // the duplicates to one slot, then drop culls the resulting
+        // zero-area face.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0], // bit-exact duplicate of slot 0
+            [1.0, 0.0, 0.0],
+        ];
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let weld = repair_weld_vertices(&mut scene);
+        assert_eq!(weld.degenerate_triangles, 1);
+        let drop = repair_drop_degenerate_triangles(&mut scene);
+        assert_eq!(drop.dropped_triangles, 1);
+        // Index buffer now empty (the one face was the degenerate
+        // one); positions array still carries the two unique slots.
+        let p = &scene.meshes[0].primitives[0];
+        match &p.indices {
+            Some(Indices::U32(idx)) => assert!(idx.is_empty()),
+            _ => panic!("weld left a U32 index buffer"),
+        }
+    }
+
+    // ----- repair_recompute_zero_normals -----
+
+    #[test]
+    fn recompute_zero_normals_fills_in_face_normal_for_zero_triple() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0; 3]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_recompute_zero_normals(&mut scene, 0.0);
+        assert_eq!(r.triangles_inspected, 1);
+        assert_eq!(r.recomputed_triangles, 1);
+        assert_eq!(r.skipped_degenerate, 0);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        // RHR cross of (1,0,0)×(0,1,0) = (0,0,1).
+        for n in ns {
+            assert!((n[2] - 1.0).abs() < 1e-6, "expected +Z, got {:?}", n);
+            assert!(n[0].abs() < 1e-6);
+            assert!(n[1].abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn recompute_zero_normals_populates_missing_normals_field() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = None;
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_recompute_zero_normals(&mut scene, 0.0);
+        assert_eq!(r.primitives_populated, 1);
+        assert_eq!(r.recomputed_triangles, 1);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        assert_eq!(ns.len(), 3);
+    }
+
+    #[test]
+    fn recompute_zero_normals_skips_triangle_with_partial_nonzero() {
+        // Three vertex slots, first carries a non-zero normal; the
+        // other two are zero. Mixed = leave alone.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_recompute_zero_normals(&mut scene, 0.0);
+        assert_eq!(r.recomputed_triangles, 0);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        // Pre-existing values preserved exactly.
+        assert_eq!(ns[0], [1.0, 0.0, 0.0]);
+        assert_eq!(ns[1], [0.0, 0.0, 0.0]);
+        assert_eq!(ns[2], [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn recompute_zero_normals_skips_degenerate_triangle() {
+        // Collinear corners — cross product is zero. Pass must
+        // count the triangle under skipped_degenerate and leave the
+        // stored zeros alone.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        prim.normals = Some(vec![[0.0; 3]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_recompute_zero_normals(&mut scene, 0.0);
+        assert_eq!(r.recomputed_triangles, 0);
+        assert_eq!(r.skipped_degenerate, 1);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        assert_eq!(ns[0], [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn recompute_zero_normals_eps_widens_zero_detection() {
+        // Stored normal is float-noise zero — strict `eps == 0.0`
+        // refuses to touch it, `eps = 1e-3` lets it through.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[1e-5, -1e-5, 1e-5]; 3]);
+
+        let mut strict = Scene3D::new();
+        strict.add_mesh(Mesh::new(None::<String>).with_primitive(prim.clone()));
+        let r_strict = repair_recompute_zero_normals(&mut strict, 0.0);
+        assert_eq!(r_strict.recomputed_triangles, 0);
+
+        let mut loose = Scene3D::new();
+        loose.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r_loose = repair_recompute_zero_normals(&mut loose, 1e-3);
+        assert_eq!(r_loose.recomputed_triangles, 1);
+        let ns = loose.meshes[0].primitives[0].normals.as_ref().unwrap();
+        assert!((ns[0][2] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn recompute_zero_normals_skips_length_mismatch() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        // Deliberately too short.
+        prim.normals = Some(vec![[0.0; 3]; 2]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_recompute_zero_normals(&mut scene, 0.0);
+        assert_eq!(r.skipped_length_mismatch, 1);
+        assert_eq!(r.recomputed_triangles, 0);
+        // Untouched.
+        assert_eq!(
+            scene.meshes[0].primitives[0]
+                .normals
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn recompute_zero_normals_idempotent_on_clean_scene() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0; 3]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r1 = repair_recompute_zero_normals(&mut scene, 0.0);
+        assert_eq!(r1.recomputed_triangles, 1);
+        // Second pass sees the now-populated normals and does nothing.
+        let r2 = repair_recompute_zero_normals(&mut scene, 0.0);
+        assert_eq!(r2.recomputed_triangles, 0);
+    }
+
+    #[test]
+    fn recompute_zero_normals_skips_non_triangles_primitive() {
+        let mut prim = Primitive::new(Topology::Lines);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        prim.normals = Some(vec![[0.0; 3]; 2]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_recompute_zero_normals(&mut scene, 0.0);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.recomputed_triangles, 0);
+        assert_eq!(r.primitives_populated, 0);
+    }
+
+    #[test]
+    fn recompute_zero_normals_negative_eps_clamps_to_zero() {
+        // Identical behaviour to eps==0.0: refuse to touch float-noise.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[1e-5, 0.0, 0.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_recompute_zero_normals(&mut scene, -1.0);
+        assert_eq!(r.recomputed_triangles, 0);
     }
 }

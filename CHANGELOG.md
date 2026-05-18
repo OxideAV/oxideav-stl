@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 8 — degenerate-triangle culling + zero-normal recompute
+  repairs (`oxideav_stl::topology`).
+  - New `repair_drop_degenerate_triangles(&mut scene) ->
+    DegenerateDropReport` removes zero-area triangles in-place from
+    every `Triangles` primitive. A triangle is considered degenerate
+    when any two of its three corner *positions* coincide by
+    bit-exact `f32` match (the same equality model the rest of the
+    crate uses). Indexed primitives keep their `Indices::U16` /
+    `Indices::U32` discriminant and have their index buffer rewritten
+    with the surviving triangle slots; unindexed primitives have
+    their `positions` (and matching-length `normals`) compacted in
+    place. Non-`Triangles` primitives are silently skipped. The
+    routine intentionally uses position-equality rather than
+    zero-cross-product to avoid culling hairline strips that CAD
+    pipelines deliberately emit. `DegenerateDropReport {
+    triangles_inspected, dropped_triangles }` — `dropped_triangles
+    == 0` is the idempotency signal.
+  - New `repair_recompute_zero_normals(&mut scene, eps) ->
+    NormalRecomputeReport` implements the STL spec's "consumer should
+    recompute from winding" sentinel. For each triangle whose three
+    *current* per-vertex normals are all (within `eps`) zero, the
+    routine rewrites them with the right-hand-rule cross product of
+    that triangle's three positions. Triangles where some corners
+    carry non-zero normals and others do not are left alone — a tell
+    that the producer mixed face-normal and vertex-normal data.
+    Primitives whose `normals` field is `None` get one freshly
+    populated; primitives whose `normals` length disagrees with
+    `positions.len()` are skipped and counted under
+    `skipped_length_mismatch`. `eps == 0.0` matches the strict
+    spec rule (exact-zero only); positive `eps` widens it to catch
+    float-noise zeros. Mathematically-degenerate faces (zero cross-
+    product magnitude) are reported under `skipped_degenerate`
+    rather than rewritten to a sentinel.
+  - Re-exported at the crate root as `repair_drop_degenerate_triangles`,
+    `DegenerateDropReport`, `repair_recompute_zero_normals`,
+    `NormalRecomputeReport`.
+  - 17 new unit tests (8 for degenerate drop, 9 for normal recompute)
+    + 6 integration tests (3 binary-decode-then-repair workflows for
+    each repair).
+
 - Round 7 — mesh topology utilities (`oxideav_stl::topology`).
   - New `shells(&scene) -> Vec<Shell>` splits the triangle soup into
     its connected components via BFS over bit-exact shared vertex

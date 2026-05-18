@@ -300,8 +300,63 @@ that differ by floating-point noise should be pre-deduplicated via
 `prim.normals` / `prim.indices` on `Triangles` primitives;
 `prim.extras`, `mesh.name`, and the scene-graph `nodes` / `roots`
 structure are preserved. Degenerate triangles (post-weld, any two
-indices coincide) are reported via `WeldReport.degenerate_triangles`
-but NOT removed — callers post-process if they want them dropped.
+indices coincide) are *reported* by `WeldReport.degenerate_triangles`
+and *removed* in a separate pass via `repair_drop_degenerate_triangles`
+— see the next section.
+
+## Degenerate-triangle culling
+
+```rust
+use oxideav_stl::repair_drop_degenerate_triangles;
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+// Drop zero-area triangles in-place. A triangle is degenerate when
+// any two of its three corner *positions* coincide by bit-exact
+// `f32` match. `DegenerateDropReport { triangles_inspected,
+// dropped_triangles }` — `dropped_triangles == 0` is the
+// idempotency signal.
+let report = repair_drop_degenerate_triangles(&mut scene);
+```
+
+Operates on every `Triangles` primitive in the scene; non-`Triangles`
+primitives are left untouched. Indexed primitives keep their
+`Indices::U16` / `Indices::U32` discriminant and have their index
+buffer rewritten with the surviving triangle slots. Unindexed
+primitives have their `positions` (and matching-length `normals`)
+compacted in place. The pass intentionally uses position-equality
+rather than zero-cross-product to avoid culling hairline strips that
+CAD pipelines deliberately emit; callers who want zero-cross culling
+can pre-filter via `validate`'s orientation report.
+
+The natural sequence is `repair_weld_vertices` →
+`repair_drop_degenerate_triangles` — the weld pass surfaces hidden
+degenerates by collapsing duplicated corners, and the drop pass
+removes them.
+
+## Zero-normal recompute (RHR sentinel)
+
+```rust
+use oxideav_stl::repair_recompute_zero_normals;
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+// Walk every Triangles primitive and, for each face whose three
+// stored per-vertex normals are all (within `eps`) zero, rewrite
+// them with the right-hand-rule cross product of its positions.
+// Triangles with even one non-zero stored normal slot are left
+// alone. Missing `normals` arrays are freshly populated.
+let report = repair_recompute_zero_normals(&mut scene, 0.0);
+```
+
+Implements the STL spec's documented "stored zero normal = consumer
+should recompute from winding" sentinel. With `eps == 0.0` only an
+exact-zero triple triggers the recompute; widening `eps` to
+`1e-6`..`1e-3` lets producer-emitted floating-point-noise zeros pass
+the gate. `NormalRecomputeReport { triangles_inspected,
+recomputed_triangles, skipped_degenerate, primitives_populated,
+skipped_length_mismatch }` — `recomputed_triangles == 0` is the
+idempotency signal; a non-zero `skipped_degenerate` highlights faces
+whose three corners are collinear / coincident and need to go
+through `repair_drop_degenerate_triangles` instead.
 
 ## ASCII comment-line tolerance
 
