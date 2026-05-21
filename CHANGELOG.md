@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 9 — orientation-flip + unit-length normal repairs
+  (`oxideav_stl::topology`).
+  - New `repair_orient_normals_from_winding(&mut scene, eps) ->
+    OrientReport` rewrites every stored facet normal whose direction
+    disagrees with the right-hand-rule cross product of its winding
+    (`dot(stored, recomputed) < 0`) to the recomputed unit-normalised
+    direction. The 1989 spec says facet orientation is "specified
+    redundantly in two ways which must be consistent"; this repair
+    makes winding the authoritative source. Per-face: zero-sentinel
+    normals are skipped (deferred to
+    `repair_recompute_zero_normals`); below-`eps` cross-product
+    triangles count under `skipped_degenerate`; primitives with a
+    missing or mismatched-length `normals` field are skipped without
+    modification. Non-`Triangles` primitives are silently skipped.
+    `flipped_normals == 0` is the idempotency signal.
+  - New `repair_normalize_unit_normals(&mut scene, unit_tolerance) ->
+    NormalizeReport` rescales any non-unit stored normal to unit
+    length, preserving direction. Matches the 1989 spec's "unit
+    normal" rule; uses the same tolerance constant
+    (`validate::DEFAULT_UNIT_NORMAL_TOLERANCE`, 1e-3) the validate
+    module's `non_unit_normal_defects` check uses, so the repair and
+    the diagnostic stay in lockstep. Zero-sentinel normals are
+    skipped; primitives with missing / length-mismatched `normals`
+    are reported. `rescaled_normals == 0` is the idempotency signal.
+  - Re-exported at the crate root as
+    `repair_orient_normals_from_winding`, `OrientReport`,
+    `repair_normalize_unit_normals`, `NormalizeReport`.
+  - 20 new unit tests (9 for orient, 11 for normalize) + 6
+    integration tests (3 binary-decode-then-repair workflows for
+    each repair) exercise pre/post validate state and through-the-
+    binary-encoder round-trips.
+
+- Round 9 — spec-style scientific ASCII number formatter.
+  - New `AsciiNumberFormat` enum (`RoundTrip` | `FixedDecimal { precision }`
+    | `SpecScientific { precision }`) on `oxideav_stl::AsciiEncodeOptions`
+    selects the float-formatting policy for ASCII output.
+  - `SpecScientific` matches the 1989 spec's `1.23456E+789` worked
+    example verbatim — mantissa + literal `E` + explicit `+`/`-`
+    exponent sign. Distinguished from Rust's `{:E}` (which emits
+    `1.23456E789` with no sign) and from the existing
+    `with_float_precision` fixed-decimal flavour.
+  - New `StlEncoder::with_spec_scientific(Option<usize>)` convenience
+    setter, plus `StlEncoder::with_number_format(AsciiNumberFormat)`
+    for full-control callers wiring the knob through higher-level
+    plumbing. The historical `with_float_precision` keeps its
+    semantics: `RoundTrip + Some(n)` → `FixedDecimal { precision: n }`
+    so existing tests are untouched.
+  - Re-exported at the crate root as `AsciiNumberFormat`.
+  - 6 new integration tests cover explicit-exponent-sign emission,
+    negative-exponent minus-sign, parser round-trip at 7-digit
+    precision, revert-to-default via `None`, binary-format
+    unaffected, and `with_number_format` ↔ `with_spec_scientific`
+    parity.
+
 - Round 8 — degenerate-triangle culling + zero-normal recompute
   repairs (`oxideav_stl::topology`).
   - New `repair_drop_degenerate_triangles(&mut scene) ->

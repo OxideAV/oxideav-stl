@@ -69,20 +69,36 @@ own `Mesh` in the resulting `Scene3D`, with one root `Node` per mesh
 attached to the scene's `roots` list in source order. The encoder
 mirrors this on output.
 
-## ASCII float-precision knob
+## ASCII number-formatting knobs
 
 By default the ASCII encoder uses Rust's round-trip-safe `{}`
-formatter for f32 values. Switch to fixed-decimal output for
-human-readable diffs:
+formatter for f32 values. Three other policies are available:
 
 ```rust
 use oxideav_stl::StlEncoder;
 
+// Fixed-decimal (compact / diff-friendly):
 let _enc = StlEncoder::new_ascii().with_float_precision(Some(6));
 // vertex 0.123457 0.000000 0.000000
+
+// Spec-style scientific (matches the 1989 spec's `1.23456E+789`
+// worked example verbatim — explicit `+`/`-` exponent sign):
+let _enc = StlEncoder::new_ascii().with_spec_scientific(Some(5));
+// vertex 1.23457E+0 0.00000E+0 0.00000E+0
 ```
 
-Has no effect on binary output.
+The full policy enum is also exposed for callers that wire the knob
+through a higher-level configuration plumbing:
+
+```rust
+use oxideav_stl::{AsciiNumberFormat, StlEncoder};
+
+let _enc = StlEncoder::new_ascii()
+    .with_number_format(AsciiNumberFormat::SpecScientific { precision: 4 });
+```
+
+All three policies have no effect on binary output (binary triangle
+records are byte-identical regardless of the knob setting).
 
 ## Pre-encode statistics
 
@@ -357,6 +373,55 @@ skipped_length_mismatch }` — `recomputed_triangles == 0` is the
 idempotency signal; a non-zero `skipped_degenerate` highlights faces
 whose three corners are collinear / coincident and need to go
 through `repair_drop_degenerate_triangles` instead.
+
+## Orientation flip + unit-length rescale (spec consistency)
+
+The 1989 spec says facet orientation is "specified redundantly in
+two ways which must be consistent": the stored normal points outward
+and the winding is CCW viewed from outside (right-hand rule). When a
+producer emits a stored normal whose direction disagrees with the
+winding (dot product < 0), `repair_orient_normals_from_winding`
+rewrites the stored normal to match the winding — winding is the
+authoritative source:
+
+```rust
+use oxideav_stl::repair_orient_normals_from_winding;
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+let report = repair_orient_normals_from_winding(&mut scene, 0.0);
+```
+
+Per-face decision: zero-sentinel normals are skipped (use
+`repair_recompute_zero_normals` first), cross-product-below-`eps`
+triangles are counted under `OrientReport::skipped_degenerate`, and
+non-`Triangles` primitives are silently skipped. `flipped_normals ==
+0` is the idempotency signal.
+
+The companion `repair_normalize_unit_normals(&mut scene, tol)`
+rescales any non-unit stored normal to unit length, preserving
+direction. The 1989 spec says each facet's normal is a *unit* vector;
+the validate module flags non-unit stored normals under
+`non_unit_normal_defects` with the same tolerance constant, and this
+is the matching mutating fix-up:
+
+```rust
+use oxideav_stl::repair_normalize_unit_normals;
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+// Default tolerance matches validate::DEFAULT_UNIT_NORMAL_TOLERANCE
+// (1e-3). Negative or non-finite values clamp to that default.
+let report = repair_normalize_unit_normals(&mut scene, 1e-3);
+```
+
+`rescaled_normals == 0` is the idempotency signal. The all-zero spec
+sentinel is left alone (use `repair_recompute_zero_normals` instead).
+The natural pipeline for a freshly-decoded STL scene is:
+
+1. `repair_weld_vertices` — collapse the soup into a shared index buffer.
+2. `repair_drop_degenerate_triangles` — cull zero-area triangles.
+3. `repair_recompute_zero_normals` — fill in the spec's sentinel zeros.
+4. `repair_orient_normals_from_winding` — align stored direction with winding.
+5. `repair_normalize_unit_normals` — rescale any non-unit normal to length 1.
 
 ## ASCII comment-line tolerance
 

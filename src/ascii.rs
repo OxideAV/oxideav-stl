@@ -232,14 +232,76 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
     encode_with(scene, &EncodeOptions::default())
 }
 
+/// Float formatting policy for [`encode_with`].
+///
+/// Three flavours, in order of strictness:
+///
+/// 1. [`AsciiNumberFormat::RoundTrip`] (the default) — Rust's `{}`
+///    formatter. Bit-exact round-trip on re-parse; not always the
+///    most human-readable choice (`0.1_f32` prints as `0.1` but
+///    `0.1_f32 + 0.2_f32` prints as `0.3` despite carrying a
+///    representation-error LSB).
+/// 2. [`AsciiNumberFormat::FixedDecimal { precision }`] — `{:.n}`
+///    fixed-decimal output. Pretty for diffs, can lose precision
+///    on the round-trip if `n` is small.
+/// 3. [`AsciiNumberFormat::SpecScientific { precision }`] — emits the
+///    `1.23456E+789` scientific-notation form the 1989 spec uses as
+///    its worked example (mantissa + literal `E` + explicit
+///    `+`/`-` sign + base-10 exponent). The strictest match to the
+///    spec letter; least common in the real-world ecosystem.
+///
+/// `SpecScientific` is the only flavour that emits an explicit `+`
+/// before non-negative exponents. Rust's native `{:E}` produces e.g.
+/// `1.23E2` with no sign; the spec example has `1.23456E+789` and the
+/// vast majority of 1989-era StL-writing tools followed that
+/// convention. Round-trip-equivalent for any consumer obeying the
+/// spec's "single precision floats, for example, 1.23456E+789"
+/// guidance; non-conformant parsers that reject `E+nnn` should not be
+/// asked to read this output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AsciiNumberFormat {
+    /// Rust's round-trip-safe `{}` formatter. Default.
+    #[default]
+    RoundTrip,
+    /// Fixed-decimal `{:.precision}` formatter — `precision` digits
+    /// after the point. Compact, diff-friendly, lossy if `precision`
+    /// is small.
+    FixedDecimal {
+        /// Decimal digits after the point.
+        precision: usize,
+    },
+    /// Spec-style scientific `mantissa.E[+-]exponent` formatter —
+    /// matches the 1989 spec's `1.23456E+789` worked example
+    /// verbatim. `precision` digits after the point in the mantissa.
+    SpecScientific {
+        /// Mantissa digits after the point.
+        precision: usize,
+    },
+}
+
 /// Float formatting precision for [`encode_with`]. Defaults to
 /// Rust's `{}` round-trip formatting; pass `Some(n)` to get
 /// `{:.n}` fixed-decimal output (e.g. for human-readable diffs).
+///
+/// The historical `float_precision` knob composes with the newer
+/// [`number_format`](Self::number_format) field as follows:
+///
+/// - `number_format == RoundTrip` + `float_precision == Some(n)` →
+///   `FixedDecimal { precision: n }` (backward-compatible: the
+///   round-1 callers built `EncodeOptions { float_precision: Some(6),
+///   .. }` and got fixed-decimal output, which we preserve).
+/// - `number_format != RoundTrip` → `number_format` wins, ignoring
+///   `float_precision`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EncodeOptions {
     /// Number of decimal digits after the point. `None` =
-    /// round-trip-safe `{}`. `Some(n)` = `{:.n}`.
+    /// round-trip-safe `{}`. `Some(n)` = `{:.n}`. Composes with
+    /// [`Self::number_format`] (see the type doc).
     pub float_precision: Option<usize>,
+    /// New (round-9) policy switch — [`AsciiNumberFormat`] selects
+    /// between the round-trip, fixed-decimal, and spec-style
+    /// scientific output forms. Defaults to round-trip.
+    pub number_format: AsciiNumberFormat,
 }
 
 impl EncodeOptions {
@@ -247,6 +309,28 @@ impl EncodeOptions {
     pub fn with_float_precision(precision: usize) -> Self {
         Self {
             float_precision: Some(precision),
+            number_format: AsciiNumberFormat::default(),
+        }
+    }
+
+    /// Convenience: build with the spec-style scientific number format.
+    pub fn with_spec_scientific(precision: usize) -> Self {
+        Self {
+            float_precision: None,
+            number_format: AsciiNumberFormat::SpecScientific { precision },
+        }
+    }
+
+    /// Resolve the effective number-formatting policy by combining
+    /// `float_precision` and `number_format` per the composition rule
+    /// documented on the struct.
+    pub(crate) fn effective_format(&self) -> AsciiNumberFormat {
+        match self.number_format {
+            AsciiNumberFormat::RoundTrip => match self.float_precision {
+                Some(n) => AsciiNumberFormat::FixedDecimal { precision: n },
+                None => AsciiNumberFormat::RoundTrip,
+            },
+            other => other,
         }
     }
 }
@@ -419,18 +503,68 @@ pub fn encode_with(scene: &Scene3D, opts: &EncodeOptions) -> Result<Vec<u8>> {
     Ok(out.into_bytes())
 }
 
-/// f32 formatter parameterised by [`EncodeOptions`]. With
-/// `float_precision = None` (the default) emits Rust's round-trip-safe
-/// `{}`; with `Some(n)` produces `{:.n}` fixed-decimal output. Non-
-/// finite values become `0` since STL has no representation for NaN
-/// or Inf.
+/// f32 formatter parameterised by [`EncodeOptions`].
+///
+/// Dispatches on [`EncodeOptions::effective_format`]:
+/// - `RoundTrip` → Rust's `{}` (default).
+/// - `FixedDecimal { precision }` → `{:.precision}`.
+/// - `SpecScientific { precision }` → mantissa + `E` + explicit
+///   `+`/`-` sign + base-10 exponent, matching the 1989 spec's
+///   `1.23456E+789` worked example.
+///
+/// Non-finite values become `0` since STL has no representation for
+/// NaN or Inf.
 fn fmt_f32_with(v: f32, opts: &EncodeOptions) -> String {
     if !v.is_finite() {
         return "0".to_string();
     }
-    match opts.float_precision {
-        None => format!("{v}"),
-        Some(p) => format!("{v:.p$}"),
+    match opts.effective_format() {
+        AsciiNumberFormat::RoundTrip => format!("{v}"),
+        AsciiNumberFormat::FixedDecimal { precision } => format!("{v:.precision$}"),
+        AsciiNumberFormat::SpecScientific { precision } => fmt_spec_scientific(v, precision),
+    }
+}
+
+/// Format `v` in the 1989 spec's `1.23456E+789` scientific-notation
+/// flavour. `precision` digits after the point in the mantissa.
+///
+/// Rules:
+/// - The literal letter is uppercase `E` (matching the spec example).
+/// - The exponent always carries an explicit sign — `+` for
+///   non-negative, `-` for negative — never bare digits. This is
+///   what distinguishes the spec example (`1.23456E+789`) from
+///   Rust's default `{:E}` formatter (`1.23456E789`).
+/// - Zero is rendered as `0.000…E+0` with `precision` zero-digits
+///   after the point. Rust's `{:E}` agrees on that form, save for
+///   the sign.
+///
+/// This is the strict-spec output flavour; most consumers in the
+/// wild also accept Rust's `{}` round-trip representation.
+fn fmt_spec_scientific(v: f32, precision: usize) -> String {
+    // We could rely on `{:E}` and patch the `Ennn` → `E+nnn` mapping
+    // by hand, but Rust's `{:.p$E}` only adds the `+` sign in the
+    // explicit-sign forms (`{:+E}` flips the *mantissa* sign, not the
+    // exponent). Easiest is to lean on `{:.p$E}` and rewrite the
+    // exponent token, which is everything after the trailing `E`.
+    let basic = format!("{:.*E}", precision, v);
+    // Split at the (single) `E`. Both halves are guaranteed because
+    // `{:E}` always emits an `E`.
+    let (mantissa, exp) = match basic.split_once('E') {
+        Some(p) => p,
+        // Defensive fall-through — should never happen given Rust's
+        // {:E} contract, but if a future stdlib change breaks the
+        // assumption we still emit a well-formed result.
+        None => return format!("{}E+0", basic),
+    };
+    // Rust emits the exponent with a leading `-` for negative values
+    // and no sign for non-negative. Normalise to always carry a sign.
+    if let Some(rest) = exp.strip_prefix('-') {
+        format!("{mantissa}E-{rest}")
+    } else {
+        // Includes the case where `exp` already starts with `+`
+        // (no current Rust stdlib version does so, but be tolerant).
+        let exp = exp.strip_prefix('+').unwrap_or(exp);
+        format!("{mantissa}E+{exp}")
     }
 }
 

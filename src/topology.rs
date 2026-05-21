@@ -38,6 +38,16 @@
 //! 3. [`repair_recompute_zero_normals`] — fill in face normals for any
 //!    facet whose stored normal is the spec's all-zero "recompute from
 //!    winding" sentinel.
+//! 4. [`repair_orient_normals_from_winding`] — for any facet whose
+//!    stored normal disagrees with the right-hand-rule cross product of
+//!    its winding (negative dot product), rewrite the stored normal to
+//!    match the winding. The 1989 spec says facet orientation is
+//!    "specified redundantly in two ways which must be consistent";
+//!    this repair makes winding the authoritative source.
+//! 5. [`repair_normalize_unit_normals`] — rescale any non-unit stored
+//!    normal to unit length, matching the spec's "unit normal" rule.
+//!    Skips the all-zero sentinel (handled by step 3) and below-eps
+//!    cross-product degenerates.
 //!
 //! ## Vertex-equality model
 //!
@@ -792,6 +802,309 @@ fn recompute_face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3], eps: f32) -> Opt
     }
 }
 
+/// Outcome of a [`repair_orient_normals_from_winding`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. `flipped_normals == 0` is the idempotency signal — a
+/// scene whose every facet already has its stored normal aligned
+/// with its winding is left untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OrientReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive.
+    pub triangles_inspected: usize,
+    /// Number of triangles whose stored normal was flipped to align
+    /// with the right-hand-rule cross product of their positions
+    /// (dot product strictly < 0 between stored and recomputed).
+    pub flipped_normals: usize,
+    /// Number of triangles left alone because the stored normal was
+    /// the all-zero spec sentinel — those are
+    /// [`repair_recompute_zero_normals`]'s job, not this one's.
+    pub skipped_zero_normal: usize,
+    /// Number of triangles left alone because the cross product
+    /// magnitude was at or below `eps` (collinear / coincident
+    /// corners). Use [`repair_drop_degenerate_triangles`] to remove
+    /// them.
+    pub skipped_degenerate: usize,
+    /// Number of primitives whose `normals` field length disagreed
+    /// with `positions.len()`. Skipped without modification.
+    pub skipped_length_mismatch: usize,
+    /// Number of primitives skipped because their `normals` field
+    /// was `None`. Run [`repair_recompute_zero_normals`] first to
+    /// populate; this pass only reorients existing normals.
+    pub skipped_missing_normals: usize,
+}
+
+/// Reorient every stored facet normal to agree with its winding.
+///
+/// The 1989 spec says facet orientation is "specified redundantly in
+/// two ways which must be consistent": (1) the direction of the
+/// normal is outward; (2) the vertices are listed in counter-clockwise
+/// order when viewed from outside (right-hand rule). When a producer
+/// emits a stored normal whose direction *disagrees* with the
+/// right-hand-rule cross product of its winding (dot product < 0),
+/// this repair rewrites the stored normal to the cross-product
+/// direction — i.e. winding wins.
+///
+/// Per-triangle decision:
+/// - Compute the right-hand-rule cross product `(v1 − v0) × (v2 − v0)`.
+/// - If the cross-product magnitude is `≤ eps`, the triangle is
+///   geometrically degenerate; count under
+///   [`OrientReport::skipped_degenerate`] and move on (see
+///   [`repair_drop_degenerate_triangles`]).
+/// - If any of the three stored per-vertex normals are the all-zero
+///   spec sentinel (component magnitudes all `≤ eps`), this pass
+///   does NOT rewrite them — that's [`repair_recompute_zero_normals`]'s
+///   job. Count under [`OrientReport::skipped_zero_normal`].
+/// - Otherwise compute `dot(stored, recomputed)` against the first
+///   stored normal. If strictly negative, rewrite all three slots to
+///   the (unit-normalised) cross product — same per-face-normal
+///   duplicated-across-3-slots convention the rest of the crate uses.
+///   If non-negative, leave the stored values alone (a tiny shrunk
+///   or overlong normal in the right direction is the
+///   [`repair_normalize_unit_normals`] pass's concern, not this one's).
+///
+/// Primitives whose `normals` field is `None` are skipped (use
+/// [`repair_recompute_zero_normals`] to populate first). Primitives
+/// whose `normals` length disagrees with `positions.len()` are
+/// reported under [`OrientReport::skipped_length_mismatch`].
+///
+/// `eps == 0.0` (or any negative / non-finite value, clamped to
+/// `0.0`) means "exact zero only" for the cross-product degeneracy
+/// gate; a small positive value catches near-degenerates.
+///
+/// Non-`Triangles` primitives are left untouched. The pass does NOT
+/// alter `prim.extras`, `mesh.name`, the scene-graph structure, or
+/// any non-normal vertex attribute.
+pub fn repair_orient_normals_from_winding(scene: &mut Scene3D, eps: f32) -> OrientReport {
+    let mut report = OrientReport::default();
+    let eps = if eps.is_finite() && eps > 0.0 {
+        eps
+    } else {
+        0.0
+    };
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            orient_normals_in_primitive(prim, eps, &mut report);
+        }
+    }
+    report
+}
+
+fn orient_normals_in_primitive(prim: &mut Primitive, eps: f32, report: &mut OrientReport) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    let positions_len = prim.positions.len();
+    let normals = match prim.normals.as_mut() {
+        None => {
+            report.skipped_missing_normals += 1;
+            return;
+        }
+        Some(ns) if ns.len() != positions_len => {
+            report.skipped_length_mismatch += 1;
+            return;
+        }
+        Some(ns) => ns,
+    };
+
+    for face_idx in 0..face_count {
+        let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+        let p0 = prim.positions.get(vi0).copied();
+        let p1 = prim.positions.get(vi1).copied();
+        let p2 = prim.positions.get(vi2).copied();
+        let (a, b, c) = match (p0, p1, p2) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => continue,
+        };
+        let stored = match normals.get(vi0).copied() {
+            Some(n) => n,
+            None => continue,
+        };
+        // All-zero spec sentinel — defer to repair_recompute_zero_normals.
+        if normal_is_zero(stored, eps) {
+            report.skipped_zero_normal += 1;
+            continue;
+        }
+        let recomputed = match recompute_face_normal(a, b, c, eps) {
+            Some(n) => n,
+            None => {
+                report.skipped_degenerate += 1;
+                continue;
+            }
+        };
+        let dot = stored[0] * recomputed[0] + stored[1] * recomputed[1] + stored[2] * recomputed[2];
+        if dot < 0.0 {
+            // Flip — rewrite all three slots to the unit-normalised
+            // cross product (same convention used by recompute).
+            if let Some(slot) = normals.get_mut(vi0) {
+                *slot = recomputed;
+            }
+            if let Some(slot) = normals.get_mut(vi1) {
+                *slot = recomputed;
+            }
+            if let Some(slot) = normals.get_mut(vi2) {
+                *slot = recomputed;
+            }
+            report.flipped_normals += 1;
+        }
+    }
+}
+
+/// Outcome of a [`repair_normalize_unit_normals`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. `rescaled_normals == 0` is the idempotency signal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NormalizeReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive.
+    pub triangles_inspected: usize,
+    /// Number of triangles whose three per-vertex normal slots were
+    /// rescaled to unit length (deviation from `1.0` exceeded
+    /// `unit_tolerance`).
+    pub rescaled_normals: usize,
+    /// Number of triangles left alone because the stored normal was
+    /// the all-zero spec sentinel — those are
+    /// [`repair_recompute_zero_normals`]'s job, not this one's.
+    pub skipped_zero_normal: usize,
+    /// Number of primitives whose `normals` field length disagreed
+    /// with `positions.len()`. Skipped without modification.
+    pub skipped_length_mismatch: usize,
+    /// Number of primitives skipped because their `normals` field
+    /// was `None` — there are no stored normals to rescale.
+    pub skipped_missing_normals: usize,
+}
+
+/// Rescale every non-zero stored facet normal to unit length.
+///
+/// Per the 1989 spec, each facet's normal is a *unit* vector. The
+/// validate module surfaces non-unit normals via
+/// `ValidationReport::non_unit_normal_defects` with the same
+/// tolerance constant; this repair is the mutating fix-up.
+///
+/// Per-triangle decision (only the first slot of each face is
+/// inspected; the per-face / 3-copy convention the rest of the crate
+/// uses means slots 1 and 2 carry the same value):
+/// - Read the stored normal.
+/// - If it is the all-zero spec sentinel (all three components have
+///   absolute magnitude `≤ unit_tolerance`), leave it alone — that's
+///   [`repair_recompute_zero_normals`]'s job. Counted under
+///   [`NormalizeReport::skipped_zero_normal`].
+/// - Otherwise compute `len = sqrt(x² + y² + z²)`. If
+///   `|len − 1.0| > unit_tolerance` (and `len` is finite and
+///   strictly positive), divide every slot's components by `len` so
+///   the resulting vector has unit length. Counted under
+///   [`NormalizeReport::rescaled_normals`].
+/// - If `|len − 1.0| ≤ unit_tolerance`, the normal is already
+///   unit-length within tolerance; do not touch.
+///
+/// Primitives whose `normals` field is `None` are skipped (use
+/// [`repair_recompute_zero_normals`] to populate first). Primitives
+/// whose `normals` length disagrees with `positions.len()` are
+/// reported under [`NormalizeReport::skipped_length_mismatch`].
+///
+/// `unit_tolerance` defaults match the validate module's
+/// `DEFAULT_UNIT_NORMAL_TOLERANCE` (`1e-3`); negative / non-finite
+/// values are clamped to `1e-3` (the validate-module default). Pass
+/// `0.0` for strict bit-exact unit-length detection.
+///
+/// Non-`Triangles` primitives are left untouched. The pass does NOT
+/// alter `prim.extras`, `mesh.name`, the scene-graph structure, or
+/// any non-normal vertex attribute.
+pub fn repair_normalize_unit_normals(scene: &mut Scene3D, unit_tolerance: f32) -> NormalizeReport {
+    let mut report = NormalizeReport::default();
+    // Match the validate module's default; clamp non-finite / negative
+    // values to that default rather than panicking.
+    let unit_tolerance = if unit_tolerance.is_finite() && unit_tolerance >= 0.0 {
+        unit_tolerance
+    } else {
+        crate::validate::DEFAULT_UNIT_NORMAL_TOLERANCE
+    };
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            normalize_normals_in_primitive(prim, unit_tolerance, &mut report);
+        }
+    }
+    report
+}
+
+fn normalize_normals_in_primitive(
+    prim: &mut Primitive,
+    unit_tolerance: f32,
+    report: &mut NormalizeReport,
+) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    let positions_len = prim.positions.len();
+    let normals = match prim.normals.as_mut() {
+        None => {
+            report.skipped_missing_normals += 1;
+            return;
+        }
+        Some(ns) if ns.len() != positions_len => {
+            report.skipped_length_mismatch += 1;
+            return;
+        }
+        Some(ns) => ns,
+    };
+
+    for face_idx in 0..face_count {
+        let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+        let stored = match normals.get(vi0).copied() {
+            Some(n) => n,
+            None => continue,
+        };
+        // All-zero spec sentinel — defer to repair_recompute_zero_normals.
+        if normal_is_zero(stored, unit_tolerance) {
+            report.skipped_zero_normal += 1;
+            continue;
+        }
+        let len2 = stored[0] * stored[0] + stored[1] * stored[1] + stored[2] * stored[2];
+        let len = len2.sqrt();
+        if !len.is_finite() || len <= 0.0 {
+            // Pathological — caller passed NaN / Inf coordinates.
+            // Leave alone; the zero-sentinel path above already
+            // handled the genuinely-zero case.
+            continue;
+        }
+        if (len - 1.0).abs() <= unit_tolerance {
+            continue;
+        }
+        let inv = 1.0 / len;
+        let rescaled = [stored[0] * inv, stored[1] * inv, stored[2] * inv];
+        if let Some(slot) = normals.get_mut(vi0) {
+            *slot = rescaled;
+        }
+        if let Some(slot) = normals.get_mut(vi1) {
+            *slot = rescaled;
+        }
+        if let Some(slot) = normals.get_mut(vi2) {
+            *slot = rescaled;
+        }
+        report.rescaled_normals += 1;
+    }
+}
+
 /// Internal collected-triangle representation used by [`shells`].
 struct CollectedTri {
     locator: FaceLocator,
@@ -1342,5 +1655,296 @@ mod tests {
         scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
         let r = repair_recompute_zero_normals(&mut scene, -1.0);
         assert_eq!(r.recomputed_triangles, 0);
+    }
+
+    // ----- repair_orient_normals_from_winding -----
+
+    #[test]
+    fn orient_normals_flips_inverted_normal() {
+        // Triangle in the XY plane with CCW winding viewed from +Z:
+        // RHR cross product is (0,0,1). Stored normal is the opposite
+        // direction (0,0,-1) — the repair must flip it.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, -1.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r.triangles_inspected, 1);
+        assert_eq!(r.flipped_normals, 1);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        for n in ns {
+            assert!((n[2] - 1.0).abs() < 1e-6, "expected +Z, got {:?}", n);
+        }
+    }
+
+    #[test]
+    fn orient_normals_leaves_aligned_normal_alone() {
+        // RHR cross product is (0,0,1); stored normal matches.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r.flipped_normals, 0);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        // Stored value preserved exactly.
+        for n in ns {
+            assert_eq!(*n, [0.0, 0.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn orient_normals_leaves_slightly_off_normal_alone() {
+        // Stored normal is a non-unit but same-direction normal —
+        // dot(stored, recomputed) > 0, so orientation matches. The
+        // unit-length fix-up is `repair_normalize_unit_normals`'s
+        // job, not this one's.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 3.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r.flipped_normals, 0);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        for n in ns {
+            assert_eq!(*n, [0.0, 0.0, 3.0]);
+        }
+    }
+
+    #[test]
+    fn orient_normals_skips_zero_sentinel() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0; 3]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r.flipped_normals, 0);
+        assert_eq!(r.skipped_zero_normal, 1);
+        // Stored zeros preserved (recompute is the other pass's job).
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        for n in ns {
+            assert_eq!(*n, [0.0, 0.0, 0.0]);
+        }
+    }
+
+    #[test]
+    fn orient_normals_skips_degenerate_triangle() {
+        // Collinear corners — cross product is zero. Stored normal is
+        // non-zero so the zero-sentinel branch does not fire; the
+        // degenerate-skip branch must.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        prim.normals = Some(vec![[1.0, 0.0, 0.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r.flipped_normals, 0);
+        assert_eq!(r.skipped_degenerate, 1);
+    }
+
+    #[test]
+    fn orient_normals_skips_missing_normals_field() {
+        // None normals = nothing to reorient. Run
+        // repair_recompute_zero_normals first to populate.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = None;
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r.flipped_normals, 0);
+        assert_eq!(r.skipped_missing_normals, 1);
+    }
+
+    #[test]
+    fn orient_normals_skips_length_mismatch() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 2]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r.skipped_length_mismatch, 1);
+        assert_eq!(r.flipped_normals, 0);
+    }
+
+    #[test]
+    fn orient_normals_idempotent_on_clean_scene() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, -1.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r1 = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r1.flipped_normals, 1);
+        let r2 = repair_orient_normals_from_winding(&mut scene, 0.0);
+        // Second pass sees the now-aligned normal and does nothing.
+        assert_eq!(r2.flipped_normals, 0);
+    }
+
+    #[test]
+    fn orient_normals_skips_non_triangles_primitive() {
+        let mut prim = Primitive::new(Topology::Lines);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, -1.0]; 2]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.flipped_normals, 0);
+    }
+
+    // ----- repair_normalize_unit_normals -----
+
+    #[test]
+    fn normalize_rescales_overlong_normal_to_unit() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        // Length-3 stored normal along +Z.
+        prim.normals = Some(vec![[0.0, 0.0, 3.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r.triangles_inspected, 1);
+        assert_eq!(r.rescaled_normals, 1);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        for n in ns {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-6, "len = {len}");
+        }
+    }
+
+    #[test]
+    fn normalize_rescales_undersize_normal_to_unit() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 0.25]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r.rescaled_normals, 1);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        for n in ns {
+            assert!((n[2] - 1.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn normalize_leaves_unit_normal_alone() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r.rescaled_normals, 0);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        for n in ns {
+            assert_eq!(*n, [0.0, 0.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn normalize_skips_zero_sentinel() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0; 3]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r.rescaled_normals, 0);
+        assert_eq!(r.skipped_zero_normal, 1);
+        // Stored zeros preserved.
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        for n in ns {
+            assert_eq!(*n, [0.0, 0.0, 0.0]);
+        }
+    }
+
+    #[test]
+    fn normalize_skips_missing_normals_field() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = None;
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r.rescaled_normals, 0);
+        assert_eq!(r.skipped_missing_normals, 1);
+    }
+
+    #[test]
+    fn normalize_skips_length_mismatch() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 5.0]; 2]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r.skipped_length_mismatch, 1);
+        assert_eq!(r.rescaled_normals, 0);
+    }
+
+    #[test]
+    fn normalize_idempotent_on_already_unit_scene() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 2.5]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r1 = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r1.rescaled_normals, 1);
+        let r2 = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r2.rescaled_normals, 0);
+    }
+
+    #[test]
+    fn normalize_skips_non_triangles_primitive() {
+        let mut prim = Primitive::new(Topology::Lines);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 7.0]; 2]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_normalize_unit_normals(&mut scene, 1e-3);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.rescaled_normals, 0);
+    }
+
+    #[test]
+    fn normalize_negative_tolerance_clamps_to_default() {
+        // Negative tolerance is clamped to the validate-module
+        // default (1e-3), so an already-unit normal is left alone.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = repair_normalize_unit_normals(&mut scene, -1.0);
+        assert_eq!(r.rescaled_normals, 0);
+    }
+
+    #[test]
+    fn normalize_composes_with_orient() {
+        // Inverted-and-overlong stored normal: orient flips it (now
+        // correctly pointing +Z), normalize rescales to unit length.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        prim.normals = Some(vec![[0.0, 0.0, -4.0]; 3]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let orient = repair_orient_normals_from_winding(&mut scene, 0.0);
+        assert_eq!(orient.flipped_normals, 1);
+        let n_after_orient = scene.meshes[0].primitives[0].normals.as_ref().unwrap()[0];
+        // After orient: the recomputed unit normal is (0,0,1), so
+        // the flipped value is exactly unit-length (orient passes
+        // through `recompute_face_normal` which already normalises).
+        assert!((n_after_orient[2] - 1.0).abs() < 1e-6);
+        let r = repair_normalize_unit_normals(&mut scene, 1e-3);
+        // No further rescale because orient already left it unit.
+        assert_eq!(r.rescaled_normals, 0);
     }
 }

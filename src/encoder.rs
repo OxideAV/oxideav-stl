@@ -15,7 +15,7 @@ use std::collections::HashSet;
 
 use oxideav_mesh3d::{Error, Mesh3DEncoder, Result, Scene3D, Topology};
 
-use crate::ascii::EncodeOptions;
+use crate::ascii::{AsciiNumberFormat, EncodeOptions};
 use crate::{ascii, binary};
 
 /// Summary statistics about the triangle stream that an [`StlEncoder`]
@@ -195,7 +195,36 @@ impl StlEncoder {
     pub fn with_float_precision(mut self, precision: Option<usize>) -> Self {
         self.ascii_opts = EncodeOptions {
             float_precision: precision,
+            number_format: self.ascii_opts.number_format,
         };
+        self
+    }
+
+    /// Switch ASCII output to the [`AsciiNumberFormat::SpecScientific`]
+    /// flavour with the given `precision` digits of mantissa after the
+    /// point — matches the 1989 spec's `1.23456E+789` worked example
+    /// verbatim. Pass `None` to revert to the default round-trip-safe
+    /// formatter. Has no effect on binary output.
+    ///
+    /// ```
+    /// use oxideav_stl::StlEncoder;
+    /// let _ = StlEncoder::new_ascii().with_spec_scientific(Some(6));
+    /// ```
+    pub fn with_spec_scientific(mut self, precision: Option<usize>) -> Self {
+        self.ascii_opts.number_format = match precision {
+            Some(p) => AsciiNumberFormat::SpecScientific { precision: p },
+            None => AsciiNumberFormat::RoundTrip,
+        };
+        self
+    }
+
+    /// Explicit setter for [`AsciiNumberFormat`] when the caller wants
+    /// full control. The [`Self::with_float_precision`] +
+    /// [`Self::with_spec_scientific`] helpers cover the common cases;
+    /// reach for this when both knobs are wired through a higher-level
+    /// configuration plumbing.
+    pub fn with_number_format(mut self, format: AsciiNumberFormat) -> Self {
+        self.ascii_opts.number_format = format;
         self
     }
 

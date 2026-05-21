@@ -48,16 +48,17 @@ pub mod topology;
 pub mod trace;
 pub mod validate;
 
-pub use ascii::EncodeOptions as AsciiEncodeOptions;
+pub use ascii::{AsciiNumberFormat, EncodeOptions as AsciiEncodeOptions};
 pub use color::{detect as detect_color_convention, ColorConvention, Stl16BitColor};
 pub use decoder::StlDecoder;
 pub use encoder::{
     EncodeStats, StlEncoder, AUTO_INJECT_SHARE_FACTOR_THRESHOLD, UNIQUE_VERTEX_COUNT_EXTRAS_KEY,
 };
 pub use topology::{
-    repair_drop_degenerate_triangles, repair_recompute_zero_normals, repair_weld_vertices, shells,
-    DegenerateDropReport, FaceLocator as TopologyFaceLocator, NormalRecomputeReport, Shell,
-    WeldReport,
+    repair_drop_degenerate_triangles, repair_normalize_unit_normals,
+    repair_orient_normals_from_winding, repair_recompute_zero_normals, repair_weld_vertices,
+    shells, DegenerateDropReport, FaceLocator as TopologyFaceLocator, NormalRecomputeReport,
+    NormalizeReport, OrientReport, Shell, WeldReport,
 };
 pub use validate::{
     bbox, validate, Bbox, FaceLocator, ValidationOptions, ValidationReport,
