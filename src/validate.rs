@@ -15,7 +15,10 @@
 //!    one triangle's vertex sits on another triangle's edge mid-span)
 //!    are prohibited. A "shared edge" is an unordered pair of vertex
 //!    positions; a watertight surface is one where every edge appears
-//!    in exactly two triangles.
+//!    in exactly two triangles. T-junction geometry is a separate
+//!    (opt-in) sub-check; the watertight edge-use count alone misses
+//!    it because the offending vertex is *not* an endpoint of the
+//!    edge it sits on.
 //! 3. **All-positive octant.** All vertex coordinates must be
 //!    "positive-definite (nonnegative and nonzero)" — i.e. strictly
 //!    greater than zero on every axis. This is an SLA-era artefact
@@ -64,6 +67,15 @@ pub const DEFAULT_NORMAL_TOLERANCE: f32 = 1.0e-3;
 /// of `1.0`. Set generously enough to absorb the float-precision loss
 /// of `f32::sqrt` on near-axis-aligned normals.
 pub const DEFAULT_UNIT_NORMAL_TOLERANCE: f32 = 1.0e-3;
+
+/// Default tolerance for "vertex V lies on edge PQ" — the
+/// perpendicular distance from V to the infinite line through P, Q
+/// must be at most `eps * |PQ|`, and the projected parameter must lie
+/// in `(eps, 1 - eps)` (strictly between the endpoints under the same
+/// tolerance). Smaller than the normal tolerance because the T-junction
+/// check is geometric and we want low false-positive rates on near-
+/// degenerate but legitimately corner-touching triangulations.
+pub const DEFAULT_T_JUNCTION_TOLERANCE: f32 = 1.0e-5;
 
 /// Per-vertex axis-aligned bounding box for a [`Scene3D`].
 ///
@@ -179,6 +191,20 @@ pub struct ValidationOptions {
     /// point noise should be pre-deduplicated through the tolerance
     /// helpers in [`crate::EncodeStats`].
     pub check_watertight: bool,
+    /// Whether to apply the T-junction check — every vertex must
+    /// either coincide with another triangle's corner or lie outside
+    /// every other triangle's edge. The spec phrases this as "a
+    /// vertex of one triangle cannot lie on the side (edge) of another
+    /// triangle". Default `false` because the brute-force check is
+    /// `O(E · V_unique)` and is intended for diagnostic use on
+    /// triangulations small enough to comfortably scan; enable it
+    /// explicitly when you need the report.
+    pub check_t_junctions: bool,
+    /// Tolerance for "vertex V lies on edge PQ" — see
+    /// [`DEFAULT_T_JUNCTION_TOLERANCE`]. Used only when
+    /// `check_t_junctions` is on. Negative / non-finite values are
+    /// clamped to the default.
+    pub t_junction_tolerance: f32,
 }
 
 impl Default for ValidationOptions {
@@ -190,6 +216,8 @@ impl Default for ValidationOptions {
             check_facet_orientation: true,
             check_unit_normal: true,
             check_watertight: true,
+            check_t_junctions: false,
+            t_junction_tolerance: DEFAULT_T_JUNCTION_TOLERANCE,
         }
     }
 }
@@ -240,6 +268,20 @@ pub struct ValidationReport {
     /// at least one triangle was walked. `false` for empty scenes
     /// or when [`ValidationOptions::check_watertight`] is off.
     pub watertight: bool,
+    /// Number of distinct (offending-vertex, edge) incidence
+    /// pairs where a triangle's corner lies strictly between the
+    /// two endpoints of another triangle's edge. The spec's
+    /// vertex-to-vertex rule forbids these. Zero when
+    /// [`ValidationOptions::check_t_junctions`] is off. Each
+    /// incidence counts once even when several edges share the
+    /// same offending vertex.
+    pub t_junction_defects: usize,
+    /// Up to [`MAX_REPORTED_DEFECTS`] illustrative facet locations
+    /// of triangles whose corner sits in the middle of some other
+    /// triangle's edge. A single triangle may appear multiple times
+    /// when more than one of its corners is offending; entries are
+    /// reported in scan order.
+    pub t_junction_examples: Vec<FaceLocator>,
 }
 
 impl ValidationReport {
@@ -251,6 +293,7 @@ impl ValidationReport {
             && self.positive_octant_defects == 0
             && self.boundary_edges == 0
             && self.non_manifold_edges == 0
+            && self.t_junction_defects == 0
     }
 }
 
@@ -397,7 +440,188 @@ pub fn validate(scene: &Scene3D, opts: &ValidationOptions) -> ValidationReport {
         // non-manifold edges is.
         rep.watertight = tri_index_global > 0 && boundary == 0 && non_manifold == 0;
     }
+
+    if opts.check_t_junctions {
+        check_t_junctions(scene, opts, &mut rep);
+    }
     rep
+}
+
+/// Brute-force T-junction detector.
+///
+/// Collects every triangle's corner positions + facet locator into a
+/// `triangles` list, then collects every unique vertex position (by
+/// bit pattern) into a `unique_verts` map. For every triangle edge
+/// `(p, q)`, scans `unique_verts` for a position that lies strictly
+/// between `p` and `q` (in the geometric, tolerance-bounded sense)
+/// and is not bit-equal to either endpoint. When a match is found,
+/// every triangle that *owns* that vertex as one of its three corners
+/// is recorded as a T-junction defect — that's the offending
+/// triangle, not the edge-owner.
+///
+/// Cost is `O(E · V_unique)`; gated behind `check_t_junctions` which
+/// defaults `false`. The example list is capped at
+/// [`MAX_REPORTED_DEFECTS`] and the count saturates at
+/// `usize::MAX / 2` so the scan can terminate early once the example
+/// list is full without changing the count's meaning.
+fn check_t_junctions(scene: &Scene3D, opts: &ValidationOptions, rep: &mut ValidationReport) {
+    use std::collections::HashMap;
+    type Vert = (u32, u32, u32);
+
+    let bits = |p: [f32; 3]| -> Vert { (p[0].to_bits(), p[1].to_bits(), p[2].to_bits()) };
+
+    // First pass — collect all triangles + the vertex → owning-faces
+    // table. Triangles whose positions are non-finite (NaN/Inf) are
+    // skipped: the on-segment test would compare with NaN and silently
+    // never match, but we surface a clean skip rather than walking the
+    // edge into a position-domain hole.
+    #[allow(clippy::type_complexity)]
+    let mut triangles: Vec<([f32; 3], [f32; 3], [f32; 3])> = Vec::new();
+    let mut vert_owners: HashMap<Vert, Vec<FaceLocator>> = HashMap::new();
+    for (mesh_idx, mesh) in scene.meshes.iter().enumerate() {
+        for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            for face_idx in 0..face_count {
+                let (vi0, vi1, vi2) = match &prim.indices {
+                    Some(Indices::U16(v)) => {
+                        let b = face_idx * 3;
+                        (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+                    }
+                    Some(Indices::U32(v)) => {
+                        let b = face_idx * 3;
+                        (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+                    }
+                    None => {
+                        let b = face_idx * 3;
+                        (b, b + 1, b + 2)
+                    }
+                };
+                let v0 = match prim.positions.get(vi0) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v1 = match prim.positions.get(vi1) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v2 = match prim.positions.get(vi2) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let loc = FaceLocator {
+                    mesh: mesh_idx,
+                    primitive: prim_idx,
+                    face: face_idx,
+                };
+                triangles.push((v0, v1, v2));
+                for v in [v0, v1, v2] {
+                    vert_owners.entry(bits(v)).or_default().push(loc);
+                }
+            }
+        }
+    }
+
+    let eps = if opts.t_junction_tolerance.is_finite() && opts.t_junction_tolerance >= 0.0 {
+        opts.t_junction_tolerance
+    } else {
+        DEFAULT_T_JUNCTION_TOLERANCE
+    };
+
+    // Track which (offending-vertex, edge) pairs we've already
+    // reported. Without this, a single vertex sitting on the same
+    // physical edge that's used by two triangles fires twice; we
+    // want one count per geometric incidence, not per edge-use.
+    let mut seen_incidence: std::collections::HashSet<(Vert, (Vert, Vert))> =
+        std::collections::HashSet::new();
+
+    'outer: for (a, b, c) in &triangles {
+        for (p, q) in [(*a, *b), (*b, *c), (*c, *a)] {
+            let pb = bits(p);
+            let qb = bits(q);
+            let edge_key = if pb <= qb { (pb, qb) } else { (qb, pb) };
+            for (&vb, owners) in &vert_owners {
+                if vb == pb || vb == qb {
+                    // Endpoint match — that's the well-formed
+                    // edge-sharing case, not a T-junction.
+                    continue;
+                }
+                let v = [
+                    f32::from_bits(vb.0),
+                    f32::from_bits(vb.1),
+                    f32::from_bits(vb.2),
+                ];
+                if !point_strictly_on_segment(p, q, v, eps) {
+                    continue;
+                }
+                if !seen_incidence.insert((vb, edge_key)) {
+                    continue;
+                }
+                // Every triangle that lists this vertex as a corner
+                // is in violation of the vertex-to-vertex rule —
+                // they each have a corner sitting in the middle of
+                // some other triangle's edge.
+                for owner in owners {
+                    rep.t_junction_defects = rep.t_junction_defects.saturating_add(1);
+                    push_capped(&mut rep.t_junction_examples, *owner);
+                }
+                if rep.t_junction_defects >= usize::MAX / 2 {
+                    break 'outer;
+                }
+            }
+        }
+    }
+}
+
+/// Geometric "vertex V lies strictly between segment endpoints P
+/// and Q" predicate. Both:
+///
+/// 1. The perpendicular distance from V to the infinite line through
+///    P and Q is at most `eps * |PQ|`.
+/// 2. The orthogonal projection of V onto PQ, expressed as a
+///    parameter `t` in `[0, 1]`, lies strictly in `(eps, 1 - eps)` —
+///    i.e. V is *between* P and Q with `eps`-margin away from each
+///    endpoint.
+///
+/// Returns `false` for degenerate edges (`|PQ|² == 0`), for non-finite
+/// inputs, and for `eps >= 0.5` (which would collapse the open
+/// interval to empty).
+fn point_strictly_on_segment(p: [f32; 3], q: [f32; 3], v: [f32; 3], eps: f32) -> bool {
+    let d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+    let pv = [v[0] - p[0], v[1] - p[1], v[2] - p[2]];
+    let len_sq = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    if !len_sq.is_finite() || len_sq == 0.0 {
+        return false;
+    }
+    if !(eps.is_finite() && (0.0..0.5).contains(&eps)) {
+        return false;
+    }
+    // t = (pv · d) / |d|² — parametric position of V's projection
+    // onto the infinite line through P, Q. Strictly between the
+    // endpoints means t ∈ (eps, 1 - eps).
+    let dot = pv[0] * d[0] + pv[1] * d[1] + pv[2] * d[2];
+    let t = dot / len_sq;
+    if !t.is_finite() || t <= eps || t >= 1.0 - eps {
+        return false;
+    }
+    // Perpendicular component squared:
+    //   |pv|² - t² · |d|² = |pv|² - (dot²) / |d|²
+    // Comparing perp² ≤ (eps · |d|)² = eps² · |d|² is the same as
+    //   |pv|² · |d|² - dot² ≤ eps² · |d|⁴.
+    // Use that form to keep one division out of the comparison.
+    let pv_sq = pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2];
+    let perp_sq_times_len_sq = pv_sq * len_sq - dot * dot;
+    if !perp_sq_times_len_sq.is_finite() {
+        return false;
+    }
+    let perp_sq_times_len_sq = perp_sq_times_len_sq.max(0.0);
+    let tol = (eps * eps) * (len_sq * len_sq);
+    perp_sq_times_len_sq <= tol
 }
 
 /// Per-vertex emitted-position iterator that mirrors the encoder's
@@ -828,5 +1052,210 @@ mod tests {
         assert_eq!(r.facet_orientation_defects, 2);
         assert_eq!(r.facet_orientation_examples[0].primitive, 0);
         assert_eq!(r.facet_orientation_examples[1].primitive, 1);
+    }
+
+    /// `t_junction_*` defaults are off + use the default tolerance.
+    #[test]
+    fn t_junction_check_is_off_by_default() {
+        let opts = ValidationOptions::default();
+        assert!(!opts.check_t_junctions);
+        assert_eq!(opts.t_junction_tolerance, DEFAULT_T_JUNCTION_TOLERANCE);
+    }
+
+    /// `point_strictly_on_segment` returns true for the midpoint of a
+    /// generic segment.
+    #[test]
+    fn point_strictly_on_segment_midpoint() {
+        assert!(point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            1.0e-5,
+        ));
+    }
+
+    /// Endpoint coincidence and out-of-bounds projection return false.
+    #[test]
+    fn point_strictly_on_segment_rejects_endpoints_and_outside() {
+        // V == P
+        assert!(!point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            1.0e-5,
+        ));
+        // V == Q
+        assert!(!point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            1.0e-5,
+        ));
+        // V past Q (t = 1.5)
+        assert!(!point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            1.0e-5,
+        ));
+        // V behind P (t = -0.5)
+        assert!(!point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            1.0e-5,
+        ));
+    }
+
+    /// A vertex off the line by more than `eps * |PQ|` is rejected.
+    #[test]
+    fn point_strictly_on_segment_rejects_off_line() {
+        assert!(!point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [5.0, 1.0, 0.0],
+            1.0e-5,
+        ));
+    }
+
+    /// Degenerate edge (`P == Q`) returns false rather than panicking.
+    #[test]
+    fn point_strictly_on_segment_rejects_degenerate_edge() {
+        assert!(!point_strictly_on_segment(
+            [1.0, 2.0, 3.0],
+            [1.0, 2.0, 3.0],
+            [1.0, 2.0, 3.0],
+            1.0e-5,
+        ));
+    }
+
+    /// Non-finite inputs return false.
+    #[test]
+    fn point_strictly_on_segment_rejects_non_finite() {
+        assert!(!point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [f32::NAN, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            1.0e-5,
+        ));
+        assert!(!point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [f32::INFINITY, 0.0, 0.0],
+            1.0e-5,
+        ));
+    }
+
+    /// Diagonal segment midpoint (proves the predicate is direction-
+    /// agnostic).
+    #[test]
+    fn point_strictly_on_segment_diagonal_midpoint() {
+        assert!(point_strictly_on_segment(
+            [0.0, 0.0, 0.0],
+            [3.0, 3.0, 3.0],
+            [1.5, 1.5, 1.5],
+            1.0e-5,
+        ));
+    }
+
+    /// Two triangles sharing the (0,0,0)→(2,0,0) edge through a
+    /// midpoint (1,0,0) — the bottom triangle is split into two halves
+    /// that each carry the midpoint. That's the textbook T-junction:
+    /// the top triangle's edge runs from (0,0,0) to (2,0,0), but the
+    /// bottom triangle's vertex sits at (1,0,0) on that edge.
+    #[test]
+    fn t_junction_classic_split_edge_is_flagged() {
+        let top = {
+            let mut p = Primitive::new(Topology::Triangles);
+            p.positions = vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.0, 2.0, 0.0]];
+            p
+        };
+        let bottom_left = {
+            let mut p = Primitive::new(Topology::Triangles);
+            p.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, -1.0, 0.0]];
+            p
+        };
+        let bottom_right = {
+            let mut p = Primitive::new(Topology::Triangles);
+            p.positions = vec![[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.5, -1.0, 0.0]];
+            p
+        };
+        let mesh = Mesh::new(None::<String>)
+            .with_primitive(top)
+            .with_primitive(bottom_left)
+            .with_primitive(bottom_right);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(mesh);
+
+        // Off — no T-junction signal.
+        let opts_off = ValidationOptions {
+            check_t_junctions: false,
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            check_watertight: false,
+            ..ValidationOptions::default()
+        };
+        let r0 = validate(&scene, &opts_off);
+        assert_eq!(r0.t_junction_defects, 0);
+
+        // On — bottom_left + bottom_right each own the (1, 0, 0)
+        // midpoint, and that point sits on the top triangle's edge.
+        let opts_on = ValidationOptions {
+            check_t_junctions: true,
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            check_watertight: false,
+            ..ValidationOptions::default()
+        };
+        let r1 = validate(&scene, &opts_on);
+        assert!(r1.t_junction_defects >= 2, "report: {r1:?}");
+        assert!(r1.t_junction_examples.len() >= 2);
+        assert!(!r1.is_clean());
+    }
+
+    /// A clean unit-cube triangulation must NOT report any T-junctions.
+    #[test]
+    fn t_junction_clean_cube_is_clean() {
+        let scene = unit_cube_indexed_scene();
+        let opts = ValidationOptions {
+            check_t_junctions: true,
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            check_watertight: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.t_junction_defects, 0, "report: {r:?}");
+        assert!(r.t_junction_examples.is_empty());
+    }
+
+    /// Negative + non-finite tolerance values clamp to the default
+    /// — the report should reflect the cube being clean either way.
+    #[test]
+    fn t_junction_negative_tolerance_clamps_to_default() {
+        let scene = unit_cube_indexed_scene();
+        let opts = ValidationOptions {
+            check_t_junctions: true,
+            t_junction_tolerance: -1.0,
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            check_watertight: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.t_junction_defects, 0);
+    }
+
+    /// Empty scene + T-junction check on → vacuously clean.
+    #[test]
+    fn t_junction_empty_scene_is_vacuous() {
+        let scene = Scene3D::new();
+        let opts = ValidationOptions {
+            check_t_junctions: true,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.t_junction_defects, 0);
+        assert!(r.is_clean());
     }
 }

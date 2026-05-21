@@ -62,7 +62,8 @@ pub use topology::{
 };
 pub use validate::{
     bbox, validate, Bbox, FaceLocator, ValidationOptions, ValidationReport,
-    DEFAULT_NORMAL_TOLERANCE, DEFAULT_UNIT_NORMAL_TOLERANCE, MAX_REPORTED_DEFECTS,
+    DEFAULT_NORMAL_TOLERANCE, DEFAULT_T_JUNCTION_TOLERANCE, DEFAULT_UNIT_NORMAL_TOLERANCE,
+    MAX_REPORTED_DEFECTS,
 };
 
 /// Format-id string used in the [`Mesh3DRegistry`](oxideav_mesh3d::Mesh3DRegistry).

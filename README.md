@@ -271,6 +271,24 @@ covering every `Triangles` vertex (non-finite coordinates skipped);
 the scene's node-graph transforms are not applied — STL produces
 identity-transform single-mesh trees in practice.
 
+### T-junction sub-check
+
+The spec's vertex-to-vertex rule says "a vertex of one triangle
+cannot lie on the side (edge) of another triangle". The watertight
+edge-use count misses this because the offending vertex is not an
+endpoint of the edge it sits on — the geometric incidence has no
+matching canonical edge key. `ValidationOptions::check_t_junctions`
+(off by default; brute-force `O(E · V_unique)` scan) reports each
+distinct `(offending-vertex, edge)` incidence under
+`t_junction_defects` and surfaces the *owning* triangle of each
+offending vertex on `t_junction_examples` (capped at
+`MAX_REPORTED_DEFECTS`). Tolerance defaults to
+`DEFAULT_T_JUNCTION_TOLERANCE` (`1e-5`): the vertex must sit within
+`eps · |edge|` perpendicular distance of the line AND its projected
+parameter must lie in `(eps, 1 - eps)`. Off-by-default because the
+scan is expensive on large meshes; turn it on explicitly for
+slicer-bound surfaces where producer pipelines might split edges.
+
 ## Topology utilities
 
 Opt-in, non-mutating analysis of the triangle soup lives in

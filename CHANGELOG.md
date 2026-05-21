@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 10 — opt-in T-junction sub-check in `oxideav_stl::validate`.
+  - The 1989 spec's vertex-to-vertex rule ("a vertex of one
+    triangle cannot lie on the side (edge) of another triangle")
+    is not covered by the watertight edge-use count alone — the
+    offending vertex is not an endpoint of the edge it sits on,
+    so canonical edge keys never collide. The new sub-check is
+    the missing piece.
+  - New `ValidationOptions::check_t_junctions: bool` (default
+    `false`) and `ValidationOptions::t_junction_tolerance: f32`
+    (default `1e-5`, exposed as the new public
+    `DEFAULT_T_JUNCTION_TOLERANCE` constant). Off by default
+    because the scan is `O(E · V_unique)` brute-force and is
+    intended for diagnostic use, not the default report.
+  - New `ValidationReport::t_junction_defects: usize` and
+    `t_junction_examples: Vec<FaceLocator>` (capped at
+    `MAX_REPORTED_DEFECTS` like the other rules). Each distinct
+    `(offending-vertex, edge)` incidence counts once; the owning
+    triangles of each offending vertex are recorded as examples
+    (a triangle whose corner sits on someone else's edge is the
+    spec violation, not the edge-owner).
+  - Geometric predicate: vertex V lies strictly between segment
+    `P-Q` when the perpendicular distance from V to the infinite
+    line through `P, Q` is at most `eps · |PQ|` AND the projected
+    parameter `t = ((V - P) · (Q - P)) / |Q - P|²` lies in
+    `(eps, 1 - eps)`. Endpoint-matching vertices (bit-exact
+    equality on either side) are excluded — that's the well-
+    formed edge-sharing case.
+  - Empty scene + check on → vacuously clean. Negative /
+    non-finite tolerance clamps to the default. Non-finite
+    coordinates and degenerate edges (`|PQ|² == 0`) return false
+    from the predicate.
+  - `ValidationReport::is_clean()` now includes
+    `t_junction_defects == 0` in its conjunction.
+  - 12 new tests: 8 unit tests on the geometric predicate +
+    integration tests (default-off behaviour, opt-in detection of
+    a 3-triangle classic split-edge layout, clean two-triangle
+    strip stays clean, public-API tolerance constant pinned,
+    100-strip cap test verifies `MAX_REPORTED_DEFECTS` cap holds
+    while the count keeps climbing).
+
 - Round 9 — orientation-flip + unit-length normal repairs
   (`oxideav_stl::topology`).
   - New `repair_orient_normals_from_winding(&mut scene, eps) ->
