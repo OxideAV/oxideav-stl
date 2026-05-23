@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 100 — consistent-winding (directed-edge) check in
+  `oxideav_stl::validate`.
+  - The 1989 spec's facet-orientation rule (§6.5) says the three
+    vertices are "listed in counterclockwise order when looking at the
+    object from the outside (right-hand rule)" and that the two pieces
+    of orientation information "must be consistent". The existing
+    `check_facet_orientation` enforces the *per-facet* consistency
+    (stored normal vs winding); the watertight rule counts *undirected*
+    edge uses. Neither catches a triangle whose winding is flipped
+    relative to its neighbour: such a surface can be perfectly
+    watertight (every edge used twice) yet have a shared edge that both
+    adjacent triangles traverse in the *same* direction. The new check
+    is that missing mesh-wide invariant.
+  - New `ValidationOptions::check_consistent_winding: bool` (default
+    `true`). For each canonical undirected edge with exactly two
+    incident triangles, the check records each triangle's traversal
+    direction; a correctly oriented manifold edge is walked in
+    *opposite* directions (`A→B` and `B→A`). Same-direction traversal
+    flags one of the two neighbours as flipped. Boundary edges (one
+    incidence) and non-manifold edges (3+) are left to the watertight
+    rule — direction consistency is only well-defined for the clean
+    two-triangle case. Degenerate edges (coincident endpoints) are
+    skipped.
+  - New `ValidationReport::inconsistent_winding_edges: usize` and
+    `inconsistent_winding_examples: Vec<FaceLocator>` (each offending
+    edge contributes both adjacent triangles' locators, de-duplicated,
+    capped at `MAX_REPORTED_DEFECTS`). `ValidationReport::is_clean()`
+    now includes `inconsistent_winding_edges == 0` in its conjunction.
+  - `FaceLocator` now derives `Hash` (used for example de-duplication).
+  - Uses bit-exact `f32` position equality like the watertight check;
+    meshes whose duplicate corners differ by floating-point noise
+    should be pre-welded via `repair_weld_vertices`.
+  - 6 new unit tests (default-on, flipped-neighbour detection,
+    clean-cube stays clean, opt-off zeroes the fields,
+    non-two-incidence edges ignored, empty scene vacuous) + 2
+    integration tests (clean binary cube has consistent winding,
+    ASCII flipped-neighbour flagged through the decoder).
+
 - Round 10 — opt-in T-junction sub-check in `oxideav_stl::validate`.
   - The 1989 spec's vertex-to-vertex rule ("a vertex of one
     triangle cannot lie on the side (edge) of another triangle")

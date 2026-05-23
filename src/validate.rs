@@ -157,7 +157,7 @@ pub fn bbox(scene: &Scene3D) -> Option<Bbox> {
 /// `mesh` and `primitive` indices are scene-graph order; `face` is the
 /// triangle's index within that primitive's effective vertex stream
 /// (post-index-buffer resolution, matching the encoder's emit order).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FaceLocator {
     /// Index into [`Scene3D::meshes`].
     pub mesh: usize,
@@ -205,6 +205,20 @@ pub struct ValidationOptions {
     /// `check_t_junctions` is on. Negative / non-finite values are
     /// clamped to the default.
     pub t_junction_tolerance: f32,
+    /// Whether to apply the consistent-winding check — for a correctly
+    /// oriented surface, an edge shared by two triangles must be
+    /// traversed in *opposite* directions by each (one walks `A→B`, the
+    /// other `B→A`). When both traverse it `A→B`, one triangle's winding
+    /// is flipped relative to its neighbour. Default `true`. The spec's
+    /// facet-orientation rule (§6.5) says the vertices are "listed in
+    /// counterclockwise order when looking at the object from the
+    /// outside" and "must be consistent"; this is the mesh-wide
+    /// (neighbour-relative) form of that rule, distinct from the
+    /// per-facet stored-normal-vs-winding [`check_facet_orientation`]
+    /// rule and from the undirected-edge [`check_watertight`] rule.
+    /// Uses bit-exact `f32` position equality like the watertight
+    /// check.
+    pub check_consistent_winding: bool,
 }
 
 impl Default for ValidationOptions {
@@ -218,6 +232,7 @@ impl Default for ValidationOptions {
             check_watertight: true,
             check_t_junctions: false,
             t_junction_tolerance: DEFAULT_T_JUNCTION_TOLERANCE,
+            check_consistent_winding: true,
         }
     }
 }
@@ -282,6 +297,19 @@ pub struct ValidationReport {
     /// when more than one of its corners is offending; entries are
     /// reported in scan order.
     pub t_junction_examples: Vec<FaceLocator>,
+    /// Number of *manifold* edges (exactly two incident triangles)
+    /// that both triangles traverse in the same direction — a sign
+    /// that one of the two adjacent triangles has flipped winding
+    /// relative to the other. Watertight surfaces can still have
+    /// these (the undirected edge-use count is 2 either way), so the
+    /// check is a distinct invariant. Zero when
+    /// [`ValidationOptions::check_consistent_winding`] is off.
+    pub inconsistent_winding_edges: usize,
+    /// Up to [`MAX_REPORTED_DEFECTS`] illustrative facet locations of
+    /// triangles incident on a same-direction shared edge. Each
+    /// offending edge contributes the locators of both adjacent
+    /// triangles (capped overall at [`MAX_REPORTED_DEFECTS`]).
+    pub inconsistent_winding_examples: Vec<FaceLocator>,
 }
 
 impl ValidationReport {
@@ -294,6 +322,7 @@ impl ValidationReport {
             && self.boundary_edges == 0
             && self.non_manifold_edges == 0
             && self.t_junction_defects == 0
+            && self.inconsistent_winding_edges == 0
     }
 }
 
@@ -444,7 +473,126 @@ pub fn validate(scene: &Scene3D, opts: &ValidationOptions) -> ValidationReport {
     if opts.check_t_junctions {
         check_t_junctions(scene, opts, &mut rep);
     }
+    if opts.check_consistent_winding {
+        check_consistent_winding(scene, &mut rep);
+    }
     rep
+}
+
+/// Mesh-wide consistent-winding detector (directed-edge form of the
+/// spec's facet-orientation rule).
+///
+/// The watertight check counts *undirected* edge uses: an edge
+/// `{A, B}` shared by two triangles is "manifold" regardless of which
+/// way each triangle walks it. But for a consistently oriented surface
+/// (every triangle CCW from outside) the two triangles sharing that
+/// edge must traverse it in *opposite* directions — one lists `A→B`,
+/// the other `B→A`. When both list `A→B`, one of the two triangles is
+/// wound backwards relative to its neighbour, which §6.5's "vertices
+/// listed in counterclockwise order … must be consistent" rule forbids
+/// even though the surface may still be perfectly watertight.
+///
+/// We collect, per canonical undirected edge, the set of directed
+/// traversals `(from, to, owner)`. An edge is flagged when it has
+/// exactly two incident triangles AND both walk it the same direction.
+/// Edges with one incidence (boundary) or three-or-more (non-manifold)
+/// are left to the watertight check — direction consistency is only
+/// well-defined for the clean two-triangle manifold case.
+fn check_consistent_winding(scene: &Scene3D, rep: &mut ValidationReport) {
+    use std::collections::HashMap;
+    type Vert = (u32, u32, u32);
+
+    let bits = |p: [f32; 3]| -> Vert { (p[0].to_bits(), p[1].to_bits(), p[2].to_bits()) };
+
+    // Per canonical undirected edge, the directed traversals that use
+    // it. `dir` is `true` when the triangle walks the edge in the
+    // canonical (lo→hi) direction, `false` for hi→lo. Two same-`dir`
+    // entries on the same edge are an inconsistency.
+    #[allow(clippy::type_complexity)]
+    let mut edge_dirs: HashMap<(Vert, Vert), Vec<(bool, FaceLocator)>> = HashMap::new();
+
+    for (mesh_idx, mesh) in scene.meshes.iter().enumerate() {
+        for (prim_idx, prim) in mesh.primitives.iter().enumerate() {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            for face_idx in 0..face_count {
+                let (vi0, vi1, vi2) = match &prim.indices {
+                    Some(Indices::U16(v)) => {
+                        let b = face_idx * 3;
+                        (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+                    }
+                    Some(Indices::U32(v)) => {
+                        let b = face_idx * 3;
+                        (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+                    }
+                    None => {
+                        let b = face_idx * 3;
+                        (b, b + 1, b + 2)
+                    }
+                };
+                let v0 = match prim.positions.get(vi0) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v1 = match prim.positions.get(vi1) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v2 = match prim.positions.get(vi2) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let loc = FaceLocator {
+                    mesh: mesh_idx,
+                    primitive: prim_idx,
+                    face: face_idx,
+                };
+                let b0 = bits(v0);
+                let b1 = bits(v1);
+                let b2 = bits(v2);
+                for (a, b) in [(b0, b1), (b1, b2), (b2, b0)] {
+                    // Skip degenerate edges whose endpoints coincide —
+                    // direction is undefined there (the degenerate /
+                    // duplicate-vertex case is the drop pass's job).
+                    if a == b {
+                        continue;
+                    }
+                    let (key, dir) = if a <= b {
+                        ((a, b), true)
+                    } else {
+                        ((b, a), false)
+                    };
+                    edge_dirs.entry(key).or_default().push((dir, loc));
+                }
+            }
+        }
+    }
+
+    let mut seen: std::collections::HashSet<FaceLocator> = std::collections::HashSet::new();
+    for uses in edge_dirs.values() {
+        // Direction consistency is only meaningful for the clean
+        // two-triangle manifold edge. Boundary (1) and non-manifold
+        // (3+) edges are reported by the watertight rule.
+        if uses.len() != 2 {
+            continue;
+        }
+        if uses[0].0 == uses[1].0 {
+            rep.inconsistent_winding_edges += 1;
+            for (_, loc) in uses {
+                // Cap the example list overall but de-duplicate so a
+                // triangle flipped against several neighbours is not
+                // listed once per shared edge.
+                if seen.insert(*loc) {
+                    push_capped(&mut rep.inconsistent_winding_examples, *loc);
+                }
+            }
+        }
+    }
 }
 
 /// Brute-force T-junction detector.
@@ -1256,6 +1404,181 @@ mod tests {
         };
         let r = validate(&scene, &opts);
         assert_eq!(r.t_junction_defects, 0);
+        assert!(r.is_clean());
+    }
+
+    /// The consistent-winding check is on by default and a properly
+    /// wound watertight cube reports zero inconsistent edges.
+    #[test]
+    fn consistent_winding_on_by_default_clean_cube() {
+        let opts = ValidationOptions::default();
+        assert!(opts.check_consistent_winding);
+        let scene = unit_cube_indexed_scene();
+        // Disable the per-facet rules (the cube fixture's single shared
+        // normal deliberately disagrees with some faces) so the winding
+        // rule is isolated.
+        let opts = ValidationOptions {
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.inconsistent_winding_edges, 0, "report: {r:?}");
+        assert!(r.inconsistent_winding_examples.is_empty());
+        assert!(r.is_clean());
+    }
+
+    /// Two triangles sharing an edge but wound the *same* way around it
+    /// (both list the edge `A→B`) are flagged. The surface is still
+    /// watertight on the undirected count — this is exactly the case
+    /// the watertight rule cannot see.
+    #[test]
+    fn consistent_winding_flags_flipped_neighbour() {
+        // Triangle 0: (0,0,0) (1,0,0) (1,1,0) — walks the diagonal
+        //   edge (1,0,0)→(1,1,0)... actually share the (0,0,0)-(1,1,0)
+        //   diagonal. Build a quad split into two triangles where the
+        //   second is wound the wrong way around the shared diagonal.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            // tri 0: 0,0,0 -> 1,0,0 -> 1,1,0  (shared edge 0,0,0 ->? )
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            // tri 1 (correctly wound would be 0,0,0 -> 1,1,0 -> 0,1,0,
+            // giving the diagonal as 1,1,0 -> 0,0,0, opposite to tri 0's
+            // 0,0,0 -> 1,1,0). We FLIP it: 0,0,0 -> 0,1,0 -> 1,1,0 so
+            // the diagonal is walked 1,1,0 -> 0,0,0 ... no — flip means
+            // both walk 0,0,0 -> 1,1,0. Use that ordering directly:
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 6]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+
+        // Determine the shared diagonal's direction in each triangle.
+        // Tri 0 edges: (0,0,0)->(1,0,0), (1,0,0)->(1,1,0),
+        //   (1,1,0)->(0,0,0). Diagonal walked (1,1,0)->(0,0,0).
+        // Tri 1 edges: (0,0,0)->(1,1,0), (1,1,0)->(0,1,0),
+        //   (0,1,0)->(0,0,0). Diagonal walked (0,0,0)->(1,1,0).
+        // Those are OPPOSITE → consistent. So this layout is the CLEAN
+        // case; assert it is clean to anchor the predicate, then build
+        // the flipped variant below.
+        let r_clean = validate(
+            &scene,
+            &ValidationOptions {
+                check_facet_orientation: false,
+                check_unit_normal: false,
+                ..ValidationOptions::default()
+            },
+        );
+        assert_eq!(r_clean.inconsistent_winding_edges, 0, "clean: {r_clean:?}");
+
+        // Now flip tri 1 so it walks the diagonal the SAME way as tri 0
+        // (both (1,1,0)->(0,0,0)). Reorder tri 1 to (1,1,0) (0,0,0)
+        // (0,1,0): edges (1,1,0)->(0,0,0), (0,0,0)->(0,1,0),
+        // (0,1,0)->(1,1,0). Diagonal walked (1,1,0)->(0,0,0) — same as
+        // tri 0 → inconsistent.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 6]);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = validate(
+            &scene,
+            &ValidationOptions {
+                check_facet_orientation: false,
+                check_unit_normal: false,
+                ..ValidationOptions::default()
+            },
+        );
+        assert_eq!(r.inconsistent_winding_edges, 1, "flipped: {r:?}");
+        // Both adjacent triangles are surfaced as examples, de-duped.
+        assert_eq!(r.inconsistent_winding_examples.len(), 2);
+        assert!(!r.is_clean());
+    }
+
+    /// Toggling the check off zeroes the winding fields even on a
+    /// flipped layout.
+    #[test]
+    fn consistent_winding_respects_opt_off() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let opts = ValidationOptions {
+            check_consistent_winding: false,
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            check_watertight: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.inconsistent_winding_edges, 0);
+        assert!(r.inconsistent_winding_examples.is_empty());
+    }
+
+    /// Boundary edges (one incident triangle) and non-manifold edges
+    /// (3+) are NOT counted as winding inconsistencies — direction
+    /// consistency is only defined for the two-triangle manifold edge.
+    #[test]
+    fn consistent_winding_ignores_non_two_incidence_edges() {
+        // Single triangle: every edge has one incidence.
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let opts = ValidationOptions {
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.inconsistent_winding_edges, 0);
+
+        // Fin: three triangles share one edge (3 incidences).
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ];
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let r = validate(&scene, &opts);
+        assert_eq!(
+            r.inconsistent_winding_edges, 0,
+            "non-manifold edge must not count: {r:?}"
+        );
+    }
+
+    /// Empty scene with the winding check on is vacuously clean.
+    #[test]
+    fn consistent_winding_empty_scene_is_vacuous() {
+        let scene = Scene3D::new();
+        let r = validate(&scene, &ValidationOptions::default());
+        assert_eq!(r.inconsistent_winding_edges, 0);
         assert!(r.is_clean());
     }
 }

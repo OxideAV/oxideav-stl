@@ -274,6 +274,58 @@ fn validation_report_after_encode_decode_roundtrip_matches_directly() {
 }
 
 #[test]
+fn round_trip_unit_cube_has_consistent_winding() {
+    // The closed binary cube is consistently wound — every manifold
+    // edge is traversed in opposite directions by its two triangles.
+    let bytes = unit_cube_binary_bytes();
+    let scene = StlDecoder::new().decode(&bytes).unwrap();
+    let r = validate(&scene, &ValidationOptions::default());
+    assert_eq!(r.inconsistent_winding_edges, 0, "report: {r:?}");
+    assert!(r.inconsistent_winding_examples.is_empty());
+}
+
+#[test]
+fn ascii_flipped_neighbour_flagged_as_inconsistent_winding() {
+    // Two triangles forming a flat quad split along the (0,0,0)-(1,1,0)
+    // diagonal, with the SECOND triangle wound so it walks the shared
+    // diagonal in the SAME direction as the first. The surface is not
+    // watertight (the diagonal is the only shared edge), but the winding
+    // check is what catches the flip: both triangles list the diagonal
+    // (1,1,0)->(0,0,0).
+    let s = "solid flip\n\
+        facet normal 0 0 1\n\
+        outer loop\n\
+        vertex 0 0 0\n\
+        vertex 1 0 0\n\
+        vertex 1 1 0\n\
+        endloop\n\
+        endfacet\n\
+        facet normal 0 0 1\n\
+        outer loop\n\
+        vertex 1 1 0\n\
+        vertex 0 0 0\n\
+        vertex 0 1 0\n\
+        endloop\n\
+        endfacet\n\
+        endsolid flip\n";
+    let scene = StlDecoder::new().decode(s.as_bytes()).unwrap();
+    let r = validate(&scene, &ValidationOptions::default());
+    assert_eq!(r.triangles_total, 2);
+    assert_eq!(r.inconsistent_winding_edges, 1, "report: {r:?}");
+    assert_eq!(r.inconsistent_winding_examples.len(), 2);
+    assert!(!r.is_clean());
+
+    // Turning the check off clears the winding fields.
+    let opts_off = ValidationOptions {
+        check_consistent_winding: false,
+        ..ValidationOptions::default()
+    };
+    let r_off = validate(&scene, &opts_off);
+    assert_eq!(r_off.inconsistent_winding_edges, 0);
+    assert!(r_off.inconsistent_winding_examples.is_empty());
+}
+
+#[test]
 fn validation_report_default_is_zero_and_unclean_for_watertight() {
     // The Default impl on `ValidationReport` produces a vacuously-clean
     // empty report. Because triangles_total is 0, watertight is false

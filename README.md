@@ -289,6 +289,27 @@ parameter must lie in `(eps, 1 - eps)`. Off-by-default because the
 scan is expensive on large meshes; turn it on explicitly for
 slicer-bound surfaces where producer pipelines might split edges.
 
+### Consistent-winding sub-check
+
+The spec's facet-orientation rule (§6.5) says the three vertices are
+"listed in counterclockwise order when looking at the object from the
+outside (right-hand rule)" and the two ways orientation is encoded
+"must be consistent". `check_facet_orientation` enforces the *per-
+facet* form (stored normal vs winding) and the watertight rule counts
+*undirected* edge uses — but neither catches a triangle whose winding
+is flipped relative to its neighbour. Such a surface can be perfectly
+watertight (every edge used twice) while a shared edge is traversed in
+the *same* direction by both adjacent triangles, which means one of
+them is wound backwards. `ValidationOptions::check_consistent_winding`
+(on by default) is the missing mesh-wide invariant: for each manifold
+edge (exactly two incident triangles) it checks the two triangles walk
+it in *opposite* directions. Same-direction edges land in
+`inconsistent_winding_edges`, with both adjacent triangles surfaced on
+`inconsistent_winding_examples` (de-duplicated, capped at
+`MAX_REPORTED_DEFECTS`). Boundary and non-manifold edges are left to
+the watertight rule. Uses bit-exact `f32` position equality, so weld
+floating-point-noise corners via `repair_weld_vertices` first.
+
 ## Topology utilities
 
 Opt-in, non-mutating analysis of the triangle soup lives in
