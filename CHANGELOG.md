@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-stl/compare/v0.0.1...v0.0.2) - 2026-05-24
+
+### Other
+
+- Round 115 — ascending-z facet sort repair (slicer optimisation)
+- Round 100 — consistent-winding (directed-edge) validation check
+- Round 10 — opt-in T-junction sub-check in oxideav_stl::validate
+- Round 9 — orient-from-winding + unit-length normal repairs + spec-style scientific ASCII formatter
+- Round 8 — degenerate-triangle culling + zero-normal recompute repairs
+- Round 7 — topology utilities + ASCII comment-line tolerance
+
 ### Added
 
 - Round 115 — ascending-z facet sort repair (`oxideav_stl::topology`).
