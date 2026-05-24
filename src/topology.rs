@@ -1105,6 +1105,180 @@ fn normalize_normals_in_primitive(
     }
 }
 
+/// Outcome of a [`repair_sort_triangles_by_z`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. `triangles_reordered == 0` is the idempotency signal — a
+/// second pass over an already-sorted scene leaves every triangle in
+/// place and reports zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SortByZReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive.
+    pub triangles_inspected: usize,
+    /// Number of triangles whose position in the emit order changed as
+    /// a result of the sort. Equals zero on an already-sorted scene.
+    pub triangles_reordered: usize,
+}
+
+/// Reorder every `Triangles` primitive's triangles into ascending
+/// z-value order, in place.
+///
+/// The 1989 spec notes: *"Sorting the triangles in ascending z-value
+/// order is recommended, but not required, in order to optimize
+/// performance of the slice program."* A slicer sweeps a cutting plane
+/// from the bottom of the object upward; presenting facets in the
+/// order their lowest corner enters the sweep lets the slicer stream
+/// triangles instead of re-scanning the whole soup at each layer. This
+/// repair materialises that recommendation.
+///
+/// ## Sort key
+///
+/// Each triangle is keyed on its three corner z-values sorted
+/// ascending: `(min_z, mid_z, max_z)`. The primary key is the lowest
+/// corner (when the slice plane first reaches the facet); `mid_z` then
+/// `max_z` are deterministic tie-breakers so facets sharing a floor
+/// still get a total, stable order. Comparison uses
+/// [`f32::total_cmp`], giving a total order over all `f32` values
+/// (including signed zero and NaN — NaN sorts to the high end, so a
+/// facet with a non-finite z-coordinate lands last rather than
+/// scrambling the finite facets around it).
+///
+/// The sort is **stable**: triangles whose keys compare equal keep
+/// their original relative emit order, so re-running the pass is
+/// idempotent (`triangles_reordered == 0` on the second call).
+///
+/// ## Per-primitive behaviour
+///
+/// - Indexed primitives (`prim.indices` is `Some`) have their index
+///   buffer rewritten in the sorted face order; the `Indices`
+///   discriminant is preserved (`U16` stays `U16`, `U32` stays `U32`)
+///   and the shared `positions` / `normals` arrays are untouched.
+/// - Unindexed primitives have their `positions` (and `normals`, when
+///   present and matched 1:1 in length) re-laid-out three corners at a
+///   time in the sorted face order. When `normals` is absent or its
+///   length disagrees with `positions`, only `positions` is reordered
+///   (the mismatch is left to [`repair_recompute_zero_normals`] /
+///   [`repair_normalize_unit_normals`] to surface).
+///
+/// Non-`Triangles` primitives are left untouched. The pass does NOT
+/// alter `prim.extras`, `mesh.name`, or the scene-graph structure, and
+/// it never adds or removes a triangle — it is a pure reordering.
+///
+/// A face whose index buffer references an out-of-range position is
+/// kept (sorting never drops geometry — that is
+/// [`repair_drop_degenerate_triangles`]' job) and sorted to the end
+/// via the NaN-high sentinel, so a malformed facet does not perturb
+/// the order of the well-formed ones.
+///
+/// Returns a single [`SortByZReport`] summed across every touched
+/// primitive.
+pub fn repair_sort_triangles_by_z(scene: &mut Scene3D) -> SortByZReport {
+    let mut report = SortByZReport::default();
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            sort_by_z_in_primitive(prim, &mut report);
+        }
+    }
+    report
+}
+
+/// Sorted-ascending z triple for one triangle. `f32::NAN` is used as
+/// the high sentinel for a corner the index buffer could not resolve,
+/// so malformed faces sort last under [`f32::total_cmp`].
+fn triangle_z_key(prim: &Primitive, face_idx: usize) -> [f32; 3] {
+    let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+    let z = |vi: usize| prim.positions.get(vi).map(|p| p[2]).unwrap_or(f32::NAN);
+    let mut zs = [z(vi0), z(vi1), z(vi2)];
+    zs.sort_by(f32::total_cmp);
+    zs
+}
+
+fn sort_by_z_in_primitive(prim: &mut Primitive, report: &mut SortByZReport) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    // Build (original_face_idx, key) and stably sort by key. A stable
+    // sort means equal-key faces keep their relative order, which is
+    // what makes a second pass idempotent.
+    let mut order: Vec<usize> = (0..face_count).collect();
+    let keys: Vec<[f32; 3]> = (0..face_count).map(|f| triangle_z_key(prim, f)).collect();
+    order.sort_by(|&a, &b| {
+        let ka = keys[a];
+        let kb = keys[b];
+        ka[0]
+            .total_cmp(&kb[0])
+            .then_with(|| ka[1].total_cmp(&kb[1]))
+            .then_with(|| ka[2].total_cmp(&kb[2]))
+    });
+
+    // Count how many faces actually moved (identity permutation ⇒ 0).
+    let reordered = order.iter().enumerate().filter(|(i, &o)| *i != o).count();
+    if reordered == 0 {
+        return;
+    }
+    report.triangles_reordered += reordered;
+
+    // Apply the permutation to the relevant buffers.
+    match prim.indices.take() {
+        Some(Indices::U16(idx)) => {
+            let mut new_idx = Vec::with_capacity(idx.len());
+            for &face_idx in &order {
+                let b = face_idx * 3;
+                new_idx.extend_from_slice(&idx[b..b + 3]);
+            }
+            prim.indices = Some(Indices::U16(new_idx));
+        }
+        Some(Indices::U32(idx)) => {
+            let mut new_idx = Vec::with_capacity(idx.len());
+            for &face_idx in &order {
+                let b = face_idx * 3;
+                new_idx.extend_from_slice(&idx[b..b + 3]);
+            }
+            prim.indices = Some(Indices::U32(new_idx));
+        }
+        None => {
+            let normals_match = prim
+                .normals
+                .as_ref()
+                .map(|ns| ns.len() == prim.positions.len())
+                .unwrap_or(false);
+            let mut new_pos: Vec<[f32; 3]> = Vec::with_capacity(prim.positions.len());
+            let mut new_norms: Vec<[f32; 3]> = if normals_match {
+                Vec::with_capacity(prim.positions.len())
+            } else {
+                Vec::new()
+            };
+            for &face_idx in &order {
+                let b = face_idx * 3;
+                new_pos.push(prim.positions[b]);
+                new_pos.push(prim.positions[b + 1]);
+                new_pos.push(prim.positions[b + 2]);
+                if normals_match {
+                    if let Some(ns) = prim.normals.as_ref() {
+                        new_norms.push(ns[b]);
+                        new_norms.push(ns[b + 1]);
+                        new_norms.push(ns[b + 2]);
+                    }
+                }
+            }
+            prim.positions = new_pos;
+            if normals_match {
+                prim.normals = Some(new_norms);
+            }
+        }
+    }
+}
+
 /// Internal collected-triangle representation used by [`shells`].
 struct CollectedTri {
     locator: FaceLocator,
@@ -1946,5 +2120,262 @@ mod tests {
         let r = repair_normalize_unit_normals(&mut scene, 1e-3);
         // No further rescale because orient already left it unit.
         assert_eq!(r.rescaled_normals, 0);
+    }
+
+    // ---- repair_sort_triangles_by_z ----
+
+    // Build an unindexed primitive from explicit per-face corner
+    // triples (z-tagged so the sort order is obvious).
+    fn soup_from_faces(faces: &[[[f32; 3]; 3]]) -> Primitive {
+        let mut prim = Primitive::new(Topology::Triangles);
+        for f in faces {
+            for v in f {
+                prim.positions.push(*v);
+            }
+        }
+        prim
+    }
+
+    // The min-corner z of every face in emit order, for assertions.
+    fn face_min_zs(prim: &Primitive) -> Vec<f32> {
+        let face_count = match &prim.indices {
+            Some(idx) => idx.len() / 3,
+            None => prim.positions.len() / 3,
+        };
+        (0..face_count)
+            .map(|f| triangle_z_key(prim, f)[0])
+            .collect()
+    }
+
+    #[test]
+    fn sort_by_z_empty_scene_is_noop() {
+        let mut scene = Scene3D::new();
+        let r = repair_sort_triangles_by_z(&mut scene);
+        assert_eq!(r, SortByZReport::default());
+    }
+
+    #[test]
+    fn sort_by_z_unindexed_orders_ascending() {
+        // Three flat triangles at z = 5, 1, 3 (emitted in that order).
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let mut scene =
+            scene_with_primitives(vec![soup_from_faces(&[flat(5.0), flat(1.0), flat(3.0)])]);
+        let r = repair_sort_triangles_by_z(&mut scene);
+        assert_eq!(r.triangles_inspected, 3);
+        // All three faces move (none was already in its sorted slot:
+        // 5→slot2, 1→slot0, 3→slot1).
+        assert_eq!(r.triangles_reordered, 3);
+        let zs = face_min_zs(&scene.meshes[0].primitives[0]);
+        assert_eq!(zs, vec![1.0, 3.0, 5.0]);
+    }
+
+    #[test]
+    fn sort_by_z_already_sorted_is_idempotent_zero() {
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let mut scene =
+            scene_with_primitives(vec![soup_from_faces(&[flat(1.0), flat(2.0), flat(3.0)])]);
+        let r = repair_sort_triangles_by_z(&mut scene);
+        assert_eq!(r.triangles_inspected, 3);
+        assert_eq!(r.triangles_reordered, 0);
+        // Buffer unchanged.
+        let zs = face_min_zs(&scene.meshes[0].primitives[0]);
+        assert_eq!(zs, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn sort_by_z_second_pass_reorders_nothing() {
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let mut scene =
+            scene_with_primitives(vec![soup_from_faces(&[flat(9.0), flat(2.0), flat(7.0)])]);
+        let first = repair_sort_triangles_by_z(&mut scene);
+        assert!(first.triangles_reordered > 0);
+        let second = repair_sort_triangles_by_z(&mut scene);
+        assert_eq!(second.triangles_reordered, 0);
+    }
+
+    #[test]
+    fn sort_by_z_keys_on_min_corner_not_max() {
+        // Tilted triangles: face A spans z 0..10, face B spans z 1..2.
+        // A's min (0) < B's min (1), so A must come first even though
+        // A's max is higher.
+        let a = [[0.0, 0.0, 0.0], [1.0, 0.0, 10.0], [0.0, 1.0, 5.0]];
+        let b = [[0.0, 0.0, 2.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.5]];
+        let mut scene = scene_with_primitives(vec![soup_from_faces(&[b, a])]);
+        repair_sort_triangles_by_z(&mut scene);
+        let prim = &scene.meshes[0].primitives[0];
+        // Face 0 should now be A (min z = 0), face 1 should be B.
+        assert_eq!(triangle_z_key(prim, 0)[0], 0.0);
+        assert_eq!(triangle_z_key(prim, 1)[0], 1.0);
+    }
+
+    #[test]
+    fn sort_by_z_stable_for_equal_keys() {
+        // Two faces with identical z-key triples but distinguishable
+        // by their x — a stable sort preserves emit order. Tag x = 100
+        // and x = 200 to identify them post-sort.
+        let mk = |x: f32| [[x, 0.0, 1.0], [x + 1.0, 0.0, 1.0], [x, 1.0, 1.0]];
+        let mut scene = scene_with_primitives(vec![soup_from_faces(&[mk(100.0), mk(200.0)])]);
+        let r = repair_sort_triangles_by_z(&mut scene);
+        // Equal keys ⇒ identity permutation ⇒ nothing moves.
+        assert_eq!(r.triangles_reordered, 0);
+        let prim = &scene.meshes[0].primitives[0];
+        assert_eq!(prim.positions[0][0], 100.0);
+        assert_eq!(prim.positions[3][0], 200.0);
+    }
+
+    #[test]
+    fn sort_by_z_indexed_preserves_u16_discriminant() {
+        // Three flat triangles z = 3, 1, 2 via a U16 index buffer over
+        // a shared (here trivially distinct) position list.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 3.0],
+            [1.0, 0.0, 3.0],
+            [0.0, 1.0, 3.0], // face 0 @ z3
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0], // face 1 @ z1
+            [0.0, 0.0, 2.0],
+            [1.0, 0.0, 2.0],
+            [0.0, 1.0, 2.0], // face 2 @ z2
+        ];
+        prim.indices = Some(Indices::U16(vec![0, 1, 2, 3, 4, 5, 6, 7, 8]));
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_sort_triangles_by_z(&mut scene);
+        assert_eq!(r.triangles_inspected, 3);
+        assert_eq!(r.triangles_reordered, 3);
+        let prim = &scene.meshes[0].primitives[0];
+        // Positions array untouched; only the index buffer reordered.
+        assert_eq!(prim.positions[0][2], 3.0);
+        match prim.indices.as_ref().unwrap() {
+            Indices::U16(idx) => {
+                // Sorted face order: z1 (3,4,5), z2 (6,7,8), z3 (0,1,2).
+                assert_eq!(idx, &vec![3, 4, 5, 6, 7, 8, 0, 1, 2]);
+            }
+            other => panic!("discriminant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sort_by_z_indexed_preserves_u32_discriminant() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 9.0],
+            [1.0, 0.0, 9.0],
+            [0.0, 1.0, 9.0],
+            [0.0, 0.0, 4.0],
+            [1.0, 0.0, 4.0],
+            [0.0, 1.0, 4.0],
+        ];
+        prim.indices = Some(Indices::U32(vec![0, 1, 2, 3, 4, 5]));
+        let mut scene = scene_with_primitives(vec![prim]);
+        repair_sort_triangles_by_z(&mut scene);
+        let prim = &scene.meshes[0].primitives[0];
+        match prim.indices.as_ref().unwrap() {
+            Indices::U32(idx) => assert_eq!(idx, &vec![3, 4, 5, 0, 1, 2]),
+            other => panic!("discriminant changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sort_by_z_unindexed_carries_normals_along() {
+        // Two faces at z = 5 then z = 1, each with a distinctive normal
+        // so we can confirm the normals follow their face after sort.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 5.0],
+            [1.0, 0.0, 5.0],
+            [0.0, 1.0, 5.0], // face hi
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0], // face lo
+        ];
+        prim.normals = Some(vec![
+            [0.5, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.5, 0.0, 0.0], // hi-face normals
+            [0.0, 0.9, 0.0],
+            [0.0, 0.9, 0.0],
+            [0.0, 0.9, 0.0], // lo-face normals
+        ]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        repair_sort_triangles_by_z(&mut scene);
+        let prim = &scene.meshes[0].primitives[0];
+        // After sort, lo face (z=1) is first; its normal (0,0.9,0)
+        // must lead the normals array.
+        assert_eq!(prim.positions[0][2], 1.0);
+        let ns = prim.normals.as_ref().unwrap();
+        assert_eq!(ns[0], [0.0, 0.9, 0.0]);
+        assert_eq!(ns[3], [0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn sort_by_z_skips_non_triangles() {
+        let mut points = Primitive::new(Topology::Points);
+        points.positions = vec![[0.0, 0.0, 9.0], [0.0, 0.0, 1.0]];
+        let mut scene = scene_with_primitives(vec![points]);
+        let r = repair_sort_triangles_by_z(&mut scene);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.triangles_reordered, 0);
+        // Points primitive untouched.
+        assert_eq!(scene.meshes[0].primitives[0].positions[0][2], 9.0);
+    }
+
+    #[test]
+    fn sort_by_z_all_nan_face_sorts_last() {
+        // A face whose three corners all carry a non-finite z has a NaN
+        // *minimum* key; total_cmp ranks NaN highest, so it sorts after
+        // every finite face rather than scrambling them. A face with a
+        // *single* NaN corner still sorts on its finite minimum (NaN is
+        // pushed to the high end of the per-face z triple), which is
+        // why this test uses an all-NaN face for the "sorts last" claim.
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let nan_face = [
+            [0.0, 0.0, f32::NAN],
+            [1.0, 0.0, f32::NAN],
+            [0.0, 1.0, f32::NAN],
+        ];
+        let mut scene =
+            scene_with_primitives(vec![soup_from_faces(&[nan_face, flat(8.0), flat(2.0)])]);
+        repair_sort_triangles_by_z(&mut scene);
+        let prim = &scene.meshes[0].primitives[0];
+        // Finite faces first (z=2 then z=8), all-NaN face last.
+        assert_eq!(triangle_z_key(prim, 0)[0], 2.0);
+        assert_eq!(triangle_z_key(prim, 1)[0], 8.0);
+        assert!(triangle_z_key(prim, 2)[0].is_nan());
+    }
+
+    #[test]
+    fn sort_by_z_single_nan_corner_keys_on_finite_min() {
+        // A face with one NaN corner but two finite ones keys on the
+        // smaller finite z (the NaN is pushed to the top of the per-
+        // face triple by total_cmp). Here the partly-NaN face's min is
+        // 2.0, so it ties with — and (stable) precedes — the flat z=2
+        // face emitted after it, and both precede z=8.
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let part_nan = [[0.0, 0.0, f32::NAN], [1.0, 0.0, 2.0], [0.0, 1.0, 3.0]];
+        let mut scene =
+            scene_with_primitives(vec![soup_from_faces(&[flat(8.0), part_nan, flat(2.0)])]);
+        repair_sort_triangles_by_z(&mut scene);
+        let prim = &scene.meshes[0].primitives[0];
+        // Slot 0 + slot 1 both have min z 2.0; slot 2 is z=8.
+        assert_eq!(triangle_z_key(prim, 0)[0], 2.0);
+        assert_eq!(triangle_z_key(prim, 1)[0], 2.0);
+        assert_eq!(triangle_z_key(prim, 2)[0], 8.0);
+    }
+
+    #[test]
+    fn sort_by_z_preserves_triangle_count() {
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let faces: Vec<_> = (0..20).map(|i| flat((20 - i) as f32)).collect();
+        let mut scene = scene_with_primitives(vec![soup_from_faces(&faces)]);
+        let before = scene.meshes[0].primitives[0].positions.len();
+        let r = repair_sort_triangles_by_z(&mut scene);
+        assert_eq!(r.triangles_inspected, 20);
+        assert_eq!(scene.meshes[0].primitives[0].positions.len(), before);
+        let zs = face_min_zs(&scene.meshes[0].primitives[0]);
+        let mut sorted = zs.clone();
+        sorted.sort_by(f32::total_cmp);
+        assert_eq!(zs, sorted);
     }
 }

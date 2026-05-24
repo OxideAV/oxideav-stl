@@ -461,6 +461,38 @@ The natural pipeline for a freshly-decoded STL scene is:
 3. `repair_recompute_zero_normals` — fill in the spec's sentinel zeros.
 4. `repair_orient_normals_from_winding` — align stored direction with winding.
 5. `repair_normalize_unit_normals` — rescale any non-unit normal to length 1.
+6. `repair_sort_triangles_by_z` — reorder facets into ascending z (see below).
+
+## Ascending-z facet sort (slicer optimisation)
+
+The 1989 spec says: *"Sorting the triangles in ascending z-value order
+is recommended, but not required, in order to optimize performance of
+the slice program."* A slicer sweeps a cutting plane upward; presenting
+facets in the order their lowest corner enters the sweep lets it stream
+triangles instead of re-scanning the whole soup each layer.
+`repair_sort_triangles_by_z` materialises that recommendation:
+
+```rust
+use oxideav_stl::repair_sort_triangles_by_z;
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+let report = repair_sort_triangles_by_z(&mut scene);
+```
+
+Each triangle is keyed on its three corner z-values sorted ascending —
+`(min_z, mid_z, max_z)` — so the primary key is the lowest corner (when
+the slice plane first touches the facet), with `mid_z`/`max_z` as
+deterministic tie-breakers. Comparison uses `f32::total_cmp`, a total
+order over every `f32` (a facet with a NaN minimum z sorts last rather
+than scrambling the finite facets). The sort is **stable** — equal-key
+facets keep their emit order, so `triangles_reordered == 0` is the
+idempotency signal on a re-run. Indexed primitives have only their index
+buffer rewritten (the `Indices::U16`/`U32` discriminant and the shared
+`positions`/`normals` are preserved); unindexed primitives have their
+`positions` (and matched-length `normals`) re-laid-out three corners at
+a time. The pass never adds, removes, or mutates a triangle's geometry —
+it is a pure count-preserving reordering, and non-`Triangles` primitives
+are skipped.
 
 ## ASCII comment-line tolerance
 

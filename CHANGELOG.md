@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 115 — ascending-z facet sort repair (`oxideav_stl::topology`).
+  - New `repair_sort_triangles_by_z(&mut scene) -> SortByZReport`
+    reorders every `Triangles` primitive's facets into ascending
+    z-value order in place, materialising the 1989 spec's
+    recommendation that "sorting the triangles in ascending z-value
+    order is recommended, but not required, in order to optimize
+    performance of the slice program". A slicer sweeps a cutting plane
+    upward; emitting facets in the order their lowest corner enters the
+    sweep lets the slicer stream triangles instead of re-scanning the
+    soup at each layer.
+  - Sort key is the triangle's three corner z-values sorted ascending —
+    `(min_z, mid_z, max_z)`. The primary key is the lowest corner (when
+    the slice plane first touches the facet); `mid_z` then `max_z` are
+    deterministic tie-breakers. Comparison uses `f32::total_cmp`, giving
+    a total order over all `f32` values — a facet whose minimum z is
+    non-finite (all three corners NaN) sorts last rather than scrambling
+    the finite facets around it; a facet with a single NaN corner still
+    keys on its finite minimum. The sort is **stable**, so equal-key
+    facets keep their emit order and a re-run reports
+    `triangles_reordered == 0` (the idempotency signal).
+  - Indexed primitives have only their index buffer rewritten in the
+    sorted face order — the `Indices::U16`/`U32` discriminant and the
+    shared `positions`/`normals` arrays are preserved. Unindexed
+    primitives have their `positions` (and `normals`, when present and
+    length-matched 1:1) re-laid-out three corners at a time. The pass
+    never adds, removes, or alters a triangle's geometry — it is a pure
+    count-preserving reordering. Non-`Triangles` primitives are skipped;
+    `prim.extras`, `mesh.name`, and the scene-graph are untouched. A
+    face whose index references an out-of-range position is kept (sort
+    never drops geometry — that is `repair_drop_degenerate_triangles`'
+    job) and sorts to the end via the NaN-high sentinel.
+  - New `SortByZReport { triangles_inspected, triangles_reordered }`.
+    Re-exported at the crate root as `repair_sort_triangles_by_z`,
+    `SortByZReport`. Added as step 6 of the README repair pipeline.
+  - 13 new unit tests (empty-scene no-op, unindexed ascending order,
+    already-sorted idempotency, second-pass-reorders-nothing,
+    keys-on-min-corner-not-max, stable-for-equal-keys, U16 + U32
+    discriminant preservation, normals-carried-along, non-`Triangles`
+    skip, all-NaN-face-sorts-last, single-NaN-corner-keys-on-finite-min,
+    count-preservation) + 5 integration tests (binary decode → sort
+    ascending, idempotent through the decoder, binary-encoder round-trip
+    in order, count + geometry-set preservation, ASCII decode → sort →
+    binary re-emit).
+
 - Round 100 — consistent-winding (directed-edge) check in
   `oxideav_stl::validate`.
   - The 1989 spec's facet-orientation rule (§6.5) says the three
