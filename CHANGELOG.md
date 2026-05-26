@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 161 — Criterion bench suite (`benches/decode`, `benches/encode`,
+  `benches/dedup`, `benches/validate`).
+  - All inputs synthesised on the fly from deterministic xorshift32
+    PRNG seeds (no committed binary corpora, no `docs/` traffic) so
+    sweeps stay bit-stable across hosts and runs. Shared fixture
+    builders live in `benches/common/mod.rs` and are pulled in by
+    each bench via `#[path = "common/mod.rs"] mod common;`.
+  - `decode` covers the binary path at 1 K / 10 K / 100 K triangles
+    and the ASCII path at 1 K / 5 K / 10 K. Throughput in bytes/s
+    so the two formats compare directly at the same triangle count.
+  - `encode` covers binary at 1 K / 10 K / 100 K (throughput in
+    bytes-out/s = `84 + n * 50`) and ASCII at 1 K / 5 K / 10 K
+    (latency only — ASCII output width depends on the per-coordinate
+    formatter).
+  - `dedup` measures the three vertex-deduplication code paths at
+    matched element counts: `StlEncoder::stats` (bit-exact
+    `HashMap`-keyed baseline), `EncodeStats::with_tolerance` (the
+    `O(N · K)` brute force), and
+    `EncodeStats::with_tolerance_spatial` (the `O(N)` spatial-grid
+    path). Both tolerance paths use `eps == 1.0e-5` to stay on
+    their general branches (`eps == 0.0` short-circuits to the
+    bit-exact branch documented in the trace contract). The bench
+    materialises the crossover the README has documented since
+    round 5: brute force wins at small N on constant factors,
+    spatial pulls ahead before 10 K vertices, and by 100 K the gap
+    is the whole reason `_spatial` exists.
+  - `validate` measures the default-on rule set (facet orientation
+    + unit-length normal + watertight/manifold + consistent winding)
+    at 1 K / 10 K / 100 K triangles, and the opt-in T-junction
+    sub-check at 100 / 300 / 1 K triangles. The 70× ratio between
+    the two confirms the round-10 `check_t_junctions = false`
+    default — turning it on is a diagnostic-only investment, not a
+    default-pipeline option.
+  - `criterion = "0.5"` added under `[dev-dependencies]` only; the
+    `[[bench]] harness = false` lines route to our own
+    `criterion_main!` instead of libtest. The standalone
+    (`--no-default-features --lib`) build path is unchanged — the
+    bench suite uses the registry-enabled feature set in line with
+    the rest of the development dependency tree.
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-stl/compare/v0.0.1...v0.0.2) - 2026-05-24
 
 ### Other

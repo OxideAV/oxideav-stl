@@ -46,3 +46,27 @@ oxideav-mesh3d = { version = "0.0", default-features = false }
 # transitive dep of oxideav-mesh3d already; we name it explicitly so
 # the standalone build path resolves the symbol at the call site.
 serde_json = "1"
+
+[dev-dependencies]
+# Criterion drives the `benches/` suite (decode, encode, dedup,
+# validate). Confined to dev-dependencies so the production build
+# tree stays Criterion-free.
+criterion = "0.5"
+
+# Each `[[bench]] harness = false` line points Criterion at our own
+# `criterion_main!` rather than the default libtest harness.
+[[bench]]
+name = "decode"
+harness = false
+
+[[bench]]
+name = "encode"
+harness = false
+
+[[bench]]
+name = "dedup"
+harness = false
+
+[[bench]]
+name = "validate"
+harness = false

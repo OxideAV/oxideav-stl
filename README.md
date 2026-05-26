@@ -544,6 +544,41 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
 Run locally with `cargo +nightly fuzz run decode` /
 `cargo +nightly fuzz run roundtrip` from `crates/oxideav-stl/`.
 
+## Benchmarks
+
+`benches/` carries four Criterion suites driven entirely by
+deterministic xorshift32 fixtures (no committed binary corpora, no
+`docs/` traffic — each generator is seeded from a fixed constant so
+results are bit-stable across hosts and runs):
+
+- `decode` — `decode_binary` (1 K / 10 K / 100 K triangles) and
+  `decode_ascii` (1 K / 5 K / 10 K). Throughput reported in bytes/s
+  so the binary and ASCII paths compare directly.
+- `encode` — `encode_binary` (1 K / 10 K / 100 K) and `encode_ascii`
+  (1 K / 5 K / 10 K) against pre-built `Scene3D` inputs. Binary
+  throughput in bytes-out/s; ASCII in latency only because the
+  output length depends on the formatter's per-coordinate width.
+- `dedup` — `stats_bit_exact`, `dedup_brute_eps_1e-5`,
+  `dedup_spatial_eps_1e-5` at matched element counts so the
+  brute-force `O(N · K)` vs spatial-grid `O(N)` crossover is
+  visible in a single comparison.
+- `validate` — `validate_default_opts` at 1 K / 10 K / 100 K
+  triangles (default-on rules: facet orientation, unit normal,
+  watertight/manifold, consistent winding) and
+  `validate_t_junctions_on` at 100 / 300 / 1 000 (the opt-in
+  brute-force T-junction sub-check) so the diagnostic-only
+  warning on the T-junction rule is empirically substantiated.
+
+Run with `cargo bench -p oxideav-stl --bench <name>` or `--quick
+--noplot` for a fast headline sweep. Indicative round-161 numbers
+on an Apple M-series host (`cargo bench --quick`, optimised
+profile): binary decode ~7.6 GiB/s at 100 K triangles; ASCII decode
+~720 MiB/s; binary encode ~2.7 GiB/s; ASCII encode 9.2 ms/10 K
+triangles; default-rule `validate` ~2.6–3.8 Melem/s; T-junction
+sub-check ~50–410 Kelem/s (a 70× brake vs the default rules at
+matched N — exactly the diagnostic-only cost the README has
+documented since round 10).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
