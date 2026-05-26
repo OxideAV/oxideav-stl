@@ -521,6 +521,29 @@ invariants, and worked examples are documented in
 `docs/trace-contract.md`; cross-implementation auditors can lockstep
 against that schema without reading source.
 
+## Fuzzing
+
+`fuzz/` carries two cargo-fuzz targets driven by a daily GitHub
+Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
+
+- `decode` — feeds arbitrary attacker-controlled bytes through
+  `StlDecoder::decode` and asserts the call always returns a `Result`
+  rather than panicking / aborting / OOMing. Exercises the detector
+  + both parsers (binary `uint32` triangle-count slot, ASCII keyword
+  walk, multi-`solid` mesh proliferation, Materialise / VisCAM
+  per-face colour distribution, `84 + N*50` size override, UTF-8 BOM
+  + leading-whitespace skip).
+- `roundtrip` — synthesises a small binary STL from fuzz-controlled
+  bytes, decodes it, re-encodes it, and asserts the triangle-count
+  slot + every per-triangle record survive byte-for-byte (the 80-byte
+  header is allowed to differ — writers substitute their own
+  signature). Mirrors the
+  `binary_cube_triangle_records_roundtrip_byte_identical` integration
+  test as a coverage-guided invariant.
+
+Run locally with `cargo +nightly fuzz run decode` /
+`cargo +nightly fuzz run roundtrip` from `crates/oxideav-stl/`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

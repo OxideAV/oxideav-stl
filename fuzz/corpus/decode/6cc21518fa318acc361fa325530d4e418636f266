@@ -1,0 +1,10 @@
+ solid s
+facet normal 2 0 1
+outer loop
+vertex 0 0 0
+vertex 1 0 0
+vertex 0 1 0
+endloop	;nd!facetendo 1
+#  
+	1													 s
+e

@@ -1,0 +1,30 @@
+name: Fuzz
+
+# Daily fuzz run for the cargo-fuzz harness under fuzz/. STL is a
+# two-flavour container — an ASCII token grammar and a packed binary
+# record stream — with a layered detector that picks one path based
+# on prefix + size sanity. Both paths involve attacker-controlled
+# length fields (binary `uint32` triangle count + LE u16 per-face
+# attribute; ASCII per-`solid` mesh proliferation) so panic-freedom on
+# `StlDecoder::decode` is the primary target, with a record-bytes
+# self-roundtrip as the secondary contract.
+#
+# No external library worth dlopen-ing as a cross-decode oracle: the
+# clean-room wall bars assimp / libigl / openSubdiv / three.js's STL
+# submodule, and the format is simple enough that there's no
+# canonical "what should this byte sequence mean" answer beyond the
+# 3D Systems spec. Decode panic-freedom + self-roundtrip is the
+# contract; the 30-minute budget is split across the two targets by
+# the reusable workflow.
+
+on:
+  schedule:
+    - cron: "37 7 * * *"   # daily 07:37 UTC, jittered off the hour
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    uses: OxideAV/.github/.github/workflows/crate-fuzz.yml@master
+    with:
+      time_budget_seconds: 1800
+    secrets: inherit

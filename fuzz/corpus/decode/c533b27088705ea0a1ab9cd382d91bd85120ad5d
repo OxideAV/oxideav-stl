@@ -1,0 +1,43 @@
+ solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1 0 0
+vertex 0 1 0
+endloop	;nd!facet 1
+#  a 1
+#  aendloop	;nd!facet 1
+#  a1
+#  aid sJfacet ni 1
+#  1
+#   1r}al 0 0 1
+#   1
+#  am 1
+# 1
+#  0 0 1
+#end
+;
+;MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM+MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMr}al 0 0 1
+#   1C
+#  a 1
+# 1
+#  0 0 1
+#   1MMMM2id sJfacet ni 1
+#  1
+#   1r}al 0 0 1
+#   1
+#  am 1
+# 1
+#  0 0 1
+# ni 1
+#  1
+#   1r}al 0 0 1
+#   1
+#  am 1
+# 1
+#  0 0 1
+#end
+;
+;MMMMMMMMMMM+MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMr}al
+#   1
+#solid s

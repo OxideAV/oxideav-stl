@@ -1,0 +1,7 @@
+solid s
+facet norMal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1 0 0
+vrexe cet
+endlid s

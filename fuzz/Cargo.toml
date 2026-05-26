@@ -1,0 +1,96 @@
+[package]
+name = "oxideav-stl-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# STL is a two-flavour container — an ASCII token grammar and a packed
+# binary record stream — with a layered detector that picks one path
+# based on prefix + size sanity. The surface worth fuzzing splits into
+# the same two paths:
+#
+#  * `decode`    — feed arbitrary bytes to `StlDecoder::decode` and
+#                  assert it always returns a `Result` rather than
+#                  panicking / aborting / OOMing. This drives the
+#                  ASCII / binary sniffer AND both parsers behind it,
+#                  exercising the classic STL danger spots:
+#
+#                    - 80-byte header + `uint32` triangle count in the
+#                      binary path: a hostile count must not allocate
+#                      `count * 50` bytes without cross-checking
+#                      against `buf.len()`.
+#                    - ASCII token walk: `solid` / `facet` / `outer
+#                      loop` / `vertex` / `endloop` / `endfacet` /
+#                      `endsolid`. A truncated facet block, missing
+#                      keyword, or non-finite float literal must
+#                      surface as `Err(Error::…)` rather than an
+#                      arithmetic / index panic.
+#                    - Multi-`solid` ASCII concatenation: the parser
+#                      must not over-allocate the meshes vector when
+#                      a hostile file declares thousands of empty
+#                      solids.
+#                    - Materialise / VisCAM colour header bytes in
+#                      the 80-byte vendor string and per-face
+#                      `uint16` attribute slot: the colour-convention
+#                      detector reads them and must tolerate any
+#                      distribution.
+#                    - UTF-8 BOM + leading whitespace handling in the
+#                      sniffer's prefix match.
+#                    - Binary-size sanity override: `84 + N*50`
+#                      exact-length classifies as binary even when
+#                      the bytes start with `b"solid \n facet"`.
+#
+#  * `roundtrip` — synthesise a small valid binary STL from
+#                  fuzz-controlled triangle count + raw triangle
+#                  bytes, decode it through `StlDecoder`, re-encode
+#                  through `StlEncoder::new_binary`, and assert the
+#                  per-triangle records survive byte-for-byte. The
+#                  80-byte header and `attribute_byte_count` slot are
+#                  NOT required to match — the spec lets the writer
+#                  pick any header string and zero out the attribute
+#                  field, so the binary_roundtrip integration test
+#                  applies that same record-only invariant.
+#
+# No external library worth dlopen-ing as a cross-decode oracle: the
+# clean-room wall bars assimp / libigl / openSubdiv / three.js, and
+# the format is simple enough that there's no canonical "what should
+# this byte sequence mean" answer beyond the spec. Decode panic-
+# freedom + self-roundtrip is the contract.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-stl]
+path = ".."
+default-features = false
+
+[dependencies.oxideav-mesh3d]
+version = "0.0"
+default-features = false
+
+# Prevent this fuzz package from being pulled into the umbrella
+# workspace at `crates/*` glob-resolve time.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+# ------------------------------------------------------------------
+# Fuzz targets.
+# ------------------------------------------------------------------
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false

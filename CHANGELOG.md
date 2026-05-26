@@ -20,6 +20,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 155 — cargo-fuzz harness + nightly fuzz workflow.
+  - New `fuzz/` subcrate with two libfuzzer targets:
+    - `decode` drives arbitrary attacker-controlled bytes through
+      `StlDecoder::decode` and asserts the call always returns a
+      `Result` rather than panicking / aborting / OOMing. The
+      detector + both parsers (binary `uint32` triangle-count slot,
+      ASCII `solid` / `facet` / `outer loop` / `vertex` keyword
+      walk, multi-`solid` mesh proliferation, Materialise / VisCAM
+      per-face colour distribution, `84 + N*50` size override,
+      UTF-8 BOM + leading-whitespace skip) are all exercised by
+      libfuzzer's coverage-guided byte mutation in a single target.
+    - `roundtrip` synthesises a small binary STL from fuzz-
+      controlled bytes (`data[0] % 65` triangles, body bytes
+      cycled from `data[1..]`), decodes it through `StlDecoder`,
+      re-encodes through `StlEncoder::new_binary`, and asserts the
+      triangle-count slot + every per-triangle record survive
+      byte-for-byte. The 80-byte header is allowed to differ — both
+      writers substitute their own signature, matching the
+      `binary_cube_triangle_records_roundtrip_byte_identical`
+      integration-test invariant. No external library worth
+      dlopen-ing as a cross-decode oracle (clean-room wall + STL
+      flavours don't agree on header semantics), so this is a
+      self-roundtrip target.
+  - The fuzz subcrate pulls `oxideav-stl` with `default-features =
+    false`, exercising the standalone (no `oxideav-core`) build
+    path end-to-end. Its own `[workspace]` block keeps it out of
+    the umbrella `crates/*` glob.
+  - New `.github/workflows/fuzz.yml` schedules a daily 1800-second
+    fuzz run via the shared `OxideAV/.github/.github/workflows/
+    crate-fuzz.yml@master` reusable workflow (cron `37 7 * * *`,
+    jittered off the hour to space against sibling-crate fuzz
+    jobs).
+  - Seed corpus: one ASCII single-facet stl, one binary single-
+    triangle stl for the `decode` target; one synthetic 51-byte
+    seed for the `roundtrip` target. Local smoke runs of 15-20s
+    per target exercised ~3M (decode) + ~880K (roundtrip)
+    iterations with zero crashes.
+
 - Round 115 — ascending-z facet sort repair (`oxideav_stl::topology`).
   - New `repair_sort_triangles_by_z(&mut scene) -> SortByZReport`
     reorders every `Triangles` primitive's facets into ascending
