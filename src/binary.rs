@@ -95,16 +95,26 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     let mut attr_bytes = Vec::with_capacity(triangle_count * 2);
     let mut any_nonzero_attr = false;
 
-    let mut cursor = HEADER_BYTES;
+    // Hot loop — iterate triangle records as fixed-size 50-byte
+    // chunks so the compiler can fold every per-field bounds check
+    // into the single chunk-length proof. `chunks_exact` lets us
+    // skip its `remainder()` tail since the up-front total-length
+    // check above guarantees an exact multiple. Symmetric to the
+    // round-175 `pack_triangle_record` optimisation on the encoder
+    // side, and the `binary_cube_triangle_records_roundtrip_byte_identical`
+    // integration test continues to pin the wire bytes.
+    let body = &bytes[HEADER_BYTES..HEADER_BYTES + body_len];
     #[cfg(feature = "trace")]
     let mut tri_index: usize = 0;
-    for _ in 0..triangle_count {
-        let n = read_vec3(&bytes[cursor..cursor + 12]);
-        let v0 = read_vec3(&bytes[cursor + 12..cursor + 24]);
-        let v1 = read_vec3(&bytes[cursor + 24..cursor + 36]);
-        let v2 = read_vec3(&bytes[cursor + 36..cursor + 48]);
-        let attr_lo = bytes[cursor + 48];
-        let attr_hi = bytes[cursor + 49];
+    for chunk in body.chunks_exact(TRIANGLE_BYTES) {
+        // `chunks_exact` yields slices known to be exactly
+        // `TRIANGLE_BYTES` long; the `try_into` turns that into an
+        // `&[u8; 50]` so `unpack_triangle_record` can index without
+        // bounds checks.
+        let record: &[u8; TRIANGLE_BYTES] = chunk
+            .try_into()
+            .expect("chunks_exact yields TRIANGLE_BYTES");
+        let (n, v0, v1, v2, attr_lo, attr_hi) = unpack_triangle_record(record);
         if attr_lo != 0 || attr_hi != 0 {
             any_nonzero_attr = true;
         }
@@ -128,7 +138,6 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
         normals.push(n);
         attr_bytes.push(attr_lo);
         attr_bytes.push(attr_hi);
-        cursor += TRIANGLE_BYTES;
     }
 
     #[cfg(feature = "trace")]
@@ -382,12 +391,41 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
 
 type Vec3 = [f32; 3];
 
-fn read_vec3(bytes: &[u8]) -> Vec3 {
-    [
-        f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        f32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-        f32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-    ]
+/// Unpack one full STL binary triangle record (normal + 3 vertices +
+/// 2-byte attribute slot) from a fixed-size 50-byte reference.
+///
+/// The decode hot loop walks the body with
+/// `chunks_exact(TRIANGLE_BYTES)` and converts each chunk to a
+/// `&[u8; 50]` reference so the compiler can prove every nested
+/// `f32::from_le_bytes` slice is in-bounds at compile time — the
+/// per-field bounds checks the previous `read_vec3(&bytes[c..c+12])`
+/// pattern carried collapse to a single chunk-length proof.
+/// Symmetric counterpart of [`pack_triangle_record`]; the bytewise
+/// invariant is pinned by
+/// `binary_cube_triangle_records_roundtrip_byte_identical`.
+#[inline]
+fn unpack_triangle_record(rec: &[u8; TRIANGLE_BYTES]) -> (Vec3, Vec3, Vec3, Vec3, u8, u8) {
+    let n: Vec3 = [
+        f32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]),
+        f32::from_le_bytes([rec[4], rec[5], rec[6], rec[7]]),
+        f32::from_le_bytes([rec[8], rec[9], rec[10], rec[11]]),
+    ];
+    let v0: Vec3 = [
+        f32::from_le_bytes([rec[12], rec[13], rec[14], rec[15]]),
+        f32::from_le_bytes([rec[16], rec[17], rec[18], rec[19]]),
+        f32::from_le_bytes([rec[20], rec[21], rec[22], rec[23]]),
+    ];
+    let v1: Vec3 = [
+        f32::from_le_bytes([rec[24], rec[25], rec[26], rec[27]]),
+        f32::from_le_bytes([rec[28], rec[29], rec[30], rec[31]]),
+        f32::from_le_bytes([rec[32], rec[33], rec[34], rec[35]]),
+    ];
+    let v2: Vec3 = [
+        f32::from_le_bytes([rec[36], rec[37], rec[38], rec[39]]),
+        f32::from_le_bytes([rec[40], rec[41], rec[42], rec[43]]),
+        f32::from_le_bytes([rec[44], rec[45], rec[46], rec[47]]),
+    ];
+    (n, v0, v1, v2, rec[48], rec[49])
 }
 
 /// Pack one full STL binary triangle record (normal + 3 vertices +
@@ -511,5 +549,51 @@ mod tests {
         let s = hex_encode(&raw);
         assert_eq!(s, "00ff12abcd");
         assert_eq!(hex_decode(&s).unwrap(), raw);
+    }
+
+    #[test]
+    fn pack_unpack_record_symmetry() {
+        // Round 189: `unpack_triangle_record` is the symmetric
+        // inverse of `pack_triangle_record`. Bit-pattern-preserving
+        // for every f32 (including the spec-sentinel zeros, the
+        // 1989 worked example's `±1.234e±05` style values, and
+        // negative zero) so a triangle-record byte stream round-trips
+        // through pack-then-unpack with f32 bit-pattern equality.
+        let cases: &[(Vec3, Vec3, Vec3, Vec3, u8, u8)] = &[
+            (
+                [0.0, 0.0, -1.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                0,
+                0,
+            ),
+            (
+                [1.234e5, -1.234e-5, 0.0],
+                [-0.0, f32::INFINITY, f32::NEG_INFINITY],
+                [f32::MIN, f32::MAX, f32::EPSILON],
+                [42.0, 0.5, -0.25],
+                0xab,
+                0xcd,
+            ),
+        ];
+        for (n, v0, v1, v2, lo, hi) in cases {
+            let packed = pack_triangle_record(*n, *v0, *v1, *v2, *lo, *hi);
+            let (n2, v0_2, v1_2, v2_2, lo2, hi2) = unpack_triangle_record(&packed);
+            for (a, b) in n.iter().zip(n2.iter()) {
+                assert_eq!(a.to_bits(), b.to_bits(), "normal bit mismatch");
+            }
+            for (a, b) in v0.iter().zip(v0_2.iter()) {
+                assert_eq!(a.to_bits(), b.to_bits(), "v0 bit mismatch");
+            }
+            for (a, b) in v1.iter().zip(v1_2.iter()) {
+                assert_eq!(a.to_bits(), b.to_bits(), "v1 bit mismatch");
+            }
+            for (a, b) in v2.iter().zip(v2_2.iter()) {
+                assert_eq!(a.to_bits(), b.to_bits(), "v2 bit mismatch");
+            }
+            assert_eq!(*lo, lo2);
+            assert_eq!(*hi, hi2);
+        }
     }
 }

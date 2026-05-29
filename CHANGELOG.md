@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Round 189 — `binary::decode` now walks the triangle body via
+  `chunks_exact(TRIANGLE_BYTES)`, converts each 50-byte chunk to an
+  `&[u8; 50]` reference via `try_into`, and unpacks it with a new
+  `unpack_triangle_record` helper. The compiler folds the four
+  per-field `f32::from_le_bytes` slice indices plus the two
+  attribute-byte reads into a single chunk-length proof, replacing
+  the previous `cursor += 50` arithmetic and four
+  `read_vec3(&bytes[cursor..cursor + 12])` invocations (each
+  carrying its own implicit bounds check). Symmetric counterpart of
+  the round-175 `pack_triangle_record` optimisation on the encoder
+  side; the round-trip wire bytes are unchanged and pinned by the
+  `binary_cube_triangle_records_roundtrip_byte_identical`
+  integration test. Measured speedup on an Apple M-series host
+  (`cargo bench --bench decode --quick`, release-profile):
+  `decode_binary/100000` 7.57 GiB/s -> 7.71 GiB/s;
+  `decode_binary/10000` 7.51 GiB/s -> 7.69 GiB/s;
+  `decode_binary/1000` 6.30 GiB/s -> 6.42 GiB/s. ASCII decode is
+  unaffected (it does not flow through the binary record unpacker).
+
 ### Added
 
 - Round 175 — profile arc: six deterministic single-threaded
