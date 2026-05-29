@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-stl/compare/v0.0.2...v0.0.3) - 2026-05-29
+
+### Other
+
+- Round 189 — chunks_exact-driven unpack_triangle_record on binary decode
+- Round 175 — profile arc: pack-record binary encode + flamegraph drivers
+- Round 161 — Criterion bench suite (decode / encode / dedup / validate)
+- Round 155 — cargo-fuzz harness + nightly fuzz workflow
+
 ### Changed
 
 - Round 189 — `binary::decode` now walks the triangle body via
