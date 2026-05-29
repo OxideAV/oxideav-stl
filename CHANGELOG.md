@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 175 — profile arc: six deterministic single-threaded
+  `examples/profile_*` drivers wrapping each hot path
+  (`encode_binary`, `decode_binary`, `encode_ascii`, `decode_ascii`,
+  `dedup_spatial`, `validate`) so a profiler (`cargo flamegraph`,
+  `samply record`, `perf record`, Instruments Time Profiler) can
+  attribute cycles line-by-line without Criterion's adaptive
+  batching getting in the way. Shared fixture builders live in
+  `examples/profile_common/mod.rs` and use the same xorshift32 seed
+  scheme as `benches/common/mod.rs`, so a profile driver's input is
+  byte-identical to the matching bench at the same triangle count.
+
+### Changed
+
+- Round 175 — `binary::encode` now packs each STL binary triangle
+  record into a stack-resident `[u8; 50]` via a new
+  `pack_triangle_record` helper and emits it with a single
+  `Vec::extend_from_slice` call, replacing the previous
+  14-call-per-triangle pattern (12 `write_vec3` four-byte writes +
+  two single-byte `push`es). The output is byte-identical to the
+  previous code; the
+  `binary_cube_triangle_records_roundtrip_byte_identical`
+  integration test pins the invariant. Measured speedup on an Apple
+  M-series host (`cargo bench --bench encode --quick`,
+  release-profile): `encode_binary/10000` 2.70 GiB/s → 7.94 GiB/s
+  (~2.9× throughput); `encode_binary/100000` 2.28 GiB/s →
+  5.55 GiB/s; `encode_binary/1000` 2.37 GiB/s → 5.83 GiB/s. The
+  ASCII output path is unaffected (it does not flow through the
+  binary record packer); ASCII encode benches stay at their
+  round-161 numbers.
+
 - Round 161 — Criterion bench suite (`benches/decode`, `benches/encode`,
   `benches/dedup`, `benches/validate`).
   - All inputs synthesised on the fly from deterministic xorshift32

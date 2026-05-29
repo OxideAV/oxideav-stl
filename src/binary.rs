@@ -331,6 +331,13 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
 
     #[cfg(feature = "trace")]
     let mut tri_index: usize = 0;
+    // Pack each triangle into a stack-resident 50-byte record then
+    // copy it out in a single `extend_from_slice` call. Profiling
+    // (`examples/profile_encode_binary.rs`, round 175) showed the
+    // previous 14-call-per-triangle pattern (12 × `write_vec3` +
+    // 2 × `push`) bottlenecked on bounds-check-and-grow overhead on
+    // the destination `Vec`; one bulk copy per triangle is materially
+    // faster while staying byte-identical.
     for ((n, v0, v1, v2), (lo, hi)) in triangles.iter().zip(attr_pairs.iter()) {
         #[cfg(feature = "trace")]
         if let Some(t) = tracer.as_ref() {
@@ -344,12 +351,8 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
             });
             tri_index += 1;
         }
-        write_vec3(&mut out, *n);
-        write_vec3(&mut out, *v0);
-        write_vec3(&mut out, *v1);
-        write_vec3(&mut out, *v2);
-        out.push(*lo);
-        out.push(*hi);
+        let record = pack_triangle_record(*n, *v0, *v1, *v2, *lo, *hi);
+        out.extend_from_slice(&record);
     }
 
     #[cfg(feature = "trace")]
@@ -387,10 +390,35 @@ fn read_vec3(bytes: &[u8]) -> Vec3 {
     ]
 }
 
-fn write_vec3(out: &mut Vec<u8>, v: Vec3) {
-    for c in v {
-        out.extend_from_slice(&c.to_le_bytes());
-    }
+/// Pack one full STL binary triangle record (normal + 3 vertices +
+/// 2-byte attribute slot) into a stack-resident 50-byte array.
+///
+/// The encoder hot loop calls this once per triangle then performs a
+/// single `Vec::extend_from_slice` of the result — materially faster
+/// than the previous 14-call-per-triangle pattern (12 four-byte
+/// writes via `write_vec3` plus two single-byte `push`es) since the
+/// destination `Vec` is grown once per record rather than per field.
+/// Layout matches §6.5.3 of the format spec byte-for-byte; the
+/// `binary_cube_triangle_records_roundtrip_byte_identical`
+/// integration test pins this invariant.
+#[inline]
+fn pack_triangle_record(n: Vec3, v0: Vec3, v1: Vec3, v2: Vec3, lo: u8, hi: u8) -> [u8; 50] {
+    let mut rec = [0u8; 50];
+    rec[0..4].copy_from_slice(&n[0].to_le_bytes());
+    rec[4..8].copy_from_slice(&n[1].to_le_bytes());
+    rec[8..12].copy_from_slice(&n[2].to_le_bytes());
+    rec[12..16].copy_from_slice(&v0[0].to_le_bytes());
+    rec[16..20].copy_from_slice(&v0[1].to_le_bytes());
+    rec[20..24].copy_from_slice(&v0[2].to_le_bytes());
+    rec[24..28].copy_from_slice(&v1[0].to_le_bytes());
+    rec[28..32].copy_from_slice(&v1[1].to_le_bytes());
+    rec[32..36].copy_from_slice(&v1[2].to_le_bytes());
+    rec[36..40].copy_from_slice(&v2[0].to_le_bytes());
+    rec[40..44].copy_from_slice(&v2[1].to_le_bytes());
+    rec[44..48].copy_from_slice(&v2[2].to_le_bytes());
+    rec[48] = lo;
+    rec[49] = hi;
+    rec
 }
 
 /// Right-hand-rule face normal from three vertices.

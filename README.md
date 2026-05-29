@@ -570,14 +570,54 @@ results are bit-stable across hosts and runs):
   warning on the T-junction rule is empirically substantiated.
 
 Run with `cargo bench -p oxideav-stl --bench <name>` or `--quick
---noplot` for a fast headline sweep. Indicative round-161 numbers
+--noplot` for a fast headline sweep. Indicative round-175 numbers
 on an Apple M-series host (`cargo bench --quick`, optimised
 profile): binary decode ~7.6 GiB/s at 100 K triangles; ASCII decode
-~720 MiB/s; binary encode ~2.7 GiB/s; ASCII encode 9.2 ms/10 K
-triangles; default-rule `validate` ~2.6–3.8 Melem/s; T-junction
-sub-check ~50–410 Kelem/s (a 70× brake vs the default rules at
-matched N — exactly the diagnostic-only cost the README has
-documented since round 10).
+~720 MiB/s; binary encode ~7.9 GiB/s at 10 K triangles after the
+round-175 pack-record optimisation (≈3× the round-161 baseline at
+matched N); ASCII encode 9.2 ms/10 K triangles; default-rule
+`validate` ~2.6–3.8 Melem/s; T-junction sub-check ~50–410 Kelem/s
+(a 70× brake vs the default rules at matched N — exactly the
+diagnostic-only cost the README has documented since round 10).
+
+## Profiling
+
+`examples/` carries six deterministic, single-threaded long-running
+drivers wrapping each hot path so a profiler can attribute cycles
+line-by-line without Criterion's adaptive batching getting in the
+way. Every driver runs against a fixed xorshift32-derived fixture
+and prints a single sanity line at the end, so two runs against the
+same release build are byte-identical inputs and the resulting
+flame graphs diff cleanly across optimisation attempts.
+
+```text
+cargo flamegraph --release --example profile_encode_binary
+samply record cargo run --release --example profile_decode_ascii
+perf record -g cargo run --release --example profile_validate
+# (Instruments' Time Profiler on macOS / Xcode equivalent on iOS)
+```
+
+The six targets:
+
+- `profile_encode_binary` (2 000 × 10 K triangles) — pack-record /
+  LE-float-byte emit hot loop in `binary::encode`.
+- `profile_decode_binary` (2 000 × 10 K triangles) — 50-byte parse
+  loop + `Scene3D` construction in `binary::decode`.
+- `profile_encode_ascii` (200 × 5 K triangles) — per-coordinate
+  float-to-string formatting + keyword emit.
+- `profile_decode_ascii` (200 × 5 K triangles) — token walk +
+  per-coordinate float lex.
+- `profile_dedup_spatial` (50 × 50 K triangles, ε = 1e-5) —
+  uniform-grid cell insertion + 27-cell scan in
+  `EncodeStats::with_tolerance_spatial`.
+- `profile_validate` (200 × 10 K triangles) — default-on rule set
+  (facet orientation + unit normal + watertight/manifold +
+  consistent winding).
+
+Shared fixture builders live in `examples/profile_common/mod.rs`
+and are pulled in by each driver via `#[path =
+"profile_common/mod.rs"] mod profile_common;` — the same pattern
+the bench suite uses for its `benches/common/mod.rs` helpers.
 
 ## License
 
