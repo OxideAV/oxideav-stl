@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Round 199 — `repair_translate_to_positive_octant(&mut scene, margin)`
+  + `DEFAULT_POSITIVE_OCTANT_MARGIN` constant + `TranslateOctantReport`
+  carrier in `oxideav_stl::topology`. Mutating fix-up for the
+  validate-module's all-positive-octant rule (the 1989 spec says
+  every vertex coordinate must be "positive-definite (nonnegative
+  AND nonzero)"). Computes the per-axis bbox minimum across every
+  `Triangles` primitive, then translates the scene by a single
+  component-wise delta so every minimum lands strictly above zero.
+  Per-axis-independent: an axis whose minimum is already `> 0` is
+  left alone (delta on that axis = 0); only axes that violate the
+  spec rule get shifted. The `margin` argument's sole purpose is to
+  push the post-shift minimum strictly past zero (not at exactly
+  zero, which would fail the spec's nonzero half); negative or
+  non-finite margins clamp to `DEFAULT_POSITIVE_OCTANT_MARGIN`
+  (`1e-6`). Non-finite vertex components pass through unchanged
+  (`NaN + delta` stays `NaN`); fully-non-finite vertex slots are
+  passed through bit-for-bit and reported under
+  `TranslateOctantReport::skipped_non_finite_vertices` instead of
+  `vertices_translated`. `prim.normals` are direction vectors and
+  are not touched; `prim.extras`, `mesh.name`, the scene-graph
+  `nodes` / `roots`, and every non-position vertex attribute
+  (tangents, uvs, colours, joints, weights, morph targets) are
+  preserved. Non-`Triangles` primitives are silently skipped, in
+  keeping with the rest of the topology repair family. The pass is
+  by construction idempotent: a second run sees a strictly-positive
+  minimum on every axis and reports `delta == [0.0; 3]` +
+  `vertices_translated == 0`. 11 unit tests (idempotency, negative-
+  margin clamp, per-axis independence, mixed-finite vertex slots,
+  non-`Triangles` skip, normal-preservation) and 5 integration
+  tests (full decoder→repair→re-validate cycle on a binary STL
+  whose `bbox.min` sits at `(-2, -3, -4)`: validate flags 1
+  positive-octant defect pre-repair and 0 post-repair; binary
+  encoder round-trip; triangle-shape preservation under pairwise
+  edge distances; second-pass no-op; positive-scene no-op).
+  Lib-test count rises by 11; integration-test file count rises by
+  one. The repair surface now mirrors every diagnostic the
+  validate module exposes for the four spec rules:
+  facet-orientation → `repair_orient_normals_from_winding`,
+  unit-normal → `repair_normalize_unit_normals`,
+  vertex-to-vertex → `repair_weld_vertices` +
+  `repair_drop_degenerate_triangles`, and now positive-octant →
+  `repair_translate_to_positive_octant`.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-stl/compare/v0.0.2...v0.0.3) - 2026-05-29
 
 ### Other

@@ -57,8 +57,9 @@ pub use encoder::{
 pub use topology::{
     repair_drop_degenerate_triangles, repair_normalize_unit_normals,
     repair_orient_normals_from_winding, repair_recompute_zero_normals, repair_sort_triangles_by_z,
-    repair_weld_vertices, shells, DegenerateDropReport, FaceLocator as TopologyFaceLocator,
-    NormalRecomputeReport, NormalizeReport, OrientReport, Shell, SortByZReport, WeldReport,
+    repair_translate_to_positive_octant, repair_weld_vertices, shells, DegenerateDropReport,
+    FaceLocator as TopologyFaceLocator, NormalRecomputeReport, NormalizeReport, OrientReport,
+    Shell, SortByZReport, TranslateOctantReport, WeldReport, DEFAULT_POSITIVE_OCTANT_MARGIN,
 };
 pub use validate::{
     bbox, validate, Bbox, FaceLocator, ValidationOptions, ValidationReport,

@@ -462,6 +462,11 @@ The natural pipeline for a freshly-decoded STL scene is:
 4. `repair_orient_normals_from_winding` — align stored direction with winding.
 5. `repair_normalize_unit_normals` — rescale any non-unit normal to length 1.
 6. `repair_sort_triangles_by_z` — reorder facets into ascending z (see below).
+7. `repair_translate_to_positive_octant` — shift the scene into the
+   spec's `(+,+,+)` octant if it isn't already there (off by default
+   in `ValidationOptions` because modern slicers ignore the rule;
+   pair it with `check_positive_octant = true` when targeting a
+   strict-1989-spec consumer).
 
 ## Ascending-z facet sort (slicer optimisation)
 
@@ -493,6 +498,42 @@ buffer rewritten (the `Indices::U16`/`U32` discriminant and the shared
 a time. The pass never adds, removes, or mutates a triangle's geometry —
 it is a pure count-preserving reordering, and non-`Triangles` primitives
 are skipped.
+
+## Translate-to-positive-octant repair (spec all-positive-octant fix-up)
+
+The 1989 spec says: *"The object represented must be located in the
+all-positive octant. In other words, all vertex coordinates must be
+positive-definite (nonnegative and nonzero) numbers."*
+`ValidationOptions::check_positive_octant` (off by default; modern
+slicers ignore the rule) surfaces facets that break this under
+`positive_octant_defects`; `repair_translate_to_positive_octant` is the
+matching mutating fix-up — it translates every `Triangles` vertex by a
+single component-wise delta so the scene's axis-aligned bounding box
+sits strictly inside the `(+,+,+)` octant:
+
+```rust
+use oxideav_stl::{repair_translate_to_positive_octant, DEFAULT_POSITIVE_OCTANT_MARGIN};
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+let report = repair_translate_to_positive_octant(&mut scene, DEFAULT_POSITIVE_OCTANT_MARGIN);
+```
+
+Per-axis, the translation triggers only when the existing minimum
+violates the spec rule (`min[i] <= 0`); axes already strictly positive
+are left alone. The `margin` argument's job is to ensure the
+post-translation minimum lands *strictly above zero* (not at exactly
+zero, which would fail the spec's "nonzero" half); negative or
+non-finite margins clamp to `DEFAULT_POSITIVE_OCTANT_MARGIN` (`1e-6`).
+The pass is a pure translation — pairwise vertex distances, face
+normals, edge connectivity, and the validate-module's facet-
+orientation / unit-normal / watertight / consistent-winding rules
+are all preserved. `prim.normals` (direction vectors) are left
+untouched. Non-finite coordinate components pass through unchanged;
+fully-non-finite vertex slots are reported under
+`TranslateOctantReport::skipped_non_finite_vertices`. The
+idempotency signal is `vertices_translated == 0` and
+`delta == [0.0; 3]` on a scene already inside the +octant; a second
+pass over the repaired scene is by construction a no-op.
 
 ## ASCII comment-line tolerance
 

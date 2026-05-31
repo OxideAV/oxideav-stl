@@ -48,6 +48,12 @@
 //!    normal to unit length, matching the spec's "unit normal" rule.
 //!    Skips the all-zero sentinel (handled by step 3) and below-eps
 //!    cross-product degenerates.
+//! 6. [`repair_translate_to_positive_octant`] — translate every vertex
+//!    so the scene's bbox sits strictly in the `(+,+,+)` octant. The
+//!    matching fix-up for the validate module's all-positive-octant
+//!    rule (off by default in `ValidationOptions` because most modern
+//!    slicers ignore it; turn both on together when targeting a strict
+//!    1989-spec consumer).
 //!
 //! ## Vertex-equality model
 //!
@@ -1279,6 +1285,281 @@ fn sort_by_z_in_primitive(prim: &mut Primitive, report: &mut SortByZReport) {
     }
 }
 
+/// Default safety margin for [`repair_translate_to_positive_octant`].
+///
+/// The 1989 spec requires every vertex coordinate to be
+/// "positive-definite (nonnegative AND nonzero)" — i.e. strictly
+/// greater than zero. After translating the scene's `bbox.min` to the
+/// origin, the smallest coordinate would be exactly `0.0`, which still
+/// fails the *nonzero* half of the rule. This margin is added to the
+/// translation so the post-repair minimum sits at `+margin` on every
+/// axis instead of exactly zero.
+///
+/// `1.0e-6` is large enough to stay clearly above the `f32` quantum
+/// even after a re-encode round-trip, and small enough to be
+/// indistinguishable from the original geometry's units (mesh units
+/// are typically millimetres or larger).
+pub const DEFAULT_POSITIVE_OCTANT_MARGIN: f32 = 1.0e-6;
+
+/// Outcome of a [`repair_translate_to_positive_octant`] pass.
+///
+/// `delta` is the translation that was actually applied to every
+/// finite vertex coordinate (component-wise add). On a no-op pass
+/// (the scene already sits strictly in the positive octant *and* the
+/// requested margin would not push it further), `delta == [0.0; 3]`
+/// and `vertices_translated == 0` — the idempotency signal.
+///
+/// `vertices_translated` counts the per-vertex updates that actually
+/// happened. A `Triangles` primitive whose positions are all
+/// non-finite contributes `0` to that counter (non-finite components
+/// are left in place).
+///
+/// `triangles_inspected` is summed across every `Triangles` primitive
+/// in the scene, mirroring the other repairs in this module.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TranslateOctantReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive. A scene with no `Triangles`
+    /// primitives reports zero — symmetric with the other repairs.
+    pub triangles_inspected: usize,
+    /// Number of *vertex* slots whose `[f32; 3]` value was rewritten
+    /// (i.e. at least one component was finite and the translation
+    /// was non-zero). A vertex with all-non-finite components is
+    /// counted under [`Self::skipped_non_finite_vertices`] instead.
+    pub vertices_translated: usize,
+    /// Number of vertex slots skipped because every component was
+    /// non-finite (`NaN` / `±inf`). Those slots are passed through
+    /// unmodified — translating `±inf + delta` would re-emit
+    /// `±inf`, but a downstream consumer typically prefers to see
+    /// the original sentinel value.
+    pub skipped_non_finite_vertices: usize,
+    /// The component-wise translation actually applied to every
+    /// finite vertex coordinate. `[0.0; 3]` on a no-op pass.
+    pub delta: [f32; 3],
+}
+
+/// Translate every `Triangles` vertex so the scene's axis-aligned
+/// bounding box sits in the strictly-positive octant.
+///
+/// The 1989 spec says: *"The object represented must be located in
+/// the all-positive octant. In other words, all vertex coordinates
+/// must be positive-definite (nonnegative and nonzero) numbers."*
+/// [`crate::validate`] surfaces facets that break this under
+/// [`crate::ValidationReport::positive_octant_defects`] (opt-in via
+/// [`crate::ValidationOptions::check_positive_octant`]). This is the
+/// matching mutating fix-up: it computes a single component-wise
+/// translation `delta` such that, after `pos += delta` on every
+/// finite vertex, every coordinate is strictly greater than zero.
+///
+/// ## Translation
+///
+/// Let `(min_x, min_y, min_z)` be the scene's per-axis minimum (over
+/// every `Triangles` vertex with a finite coordinate on that axis).
+/// Per-axis the translation is:
+///
+/// ```text
+/// delta[i] = if min[i] <= 0.0 { margin - min[i] } else { 0.0 }
+/// ```
+///
+/// — i.e. the axis is shifted only when the existing minimum
+/// violates the spec's "positive-definite (nonnegative AND nonzero)"
+/// rule on that axis (`min[i] <= 0`). The margin's only job is to
+/// ensure the post-shift minimum lands *strictly* above zero, not
+/// at any particular distance from zero. An axis whose minimum is
+/// already `> 0` is left alone — even a minimum of `+1e-30`
+/// satisfies the spec invariant. The same applies to scenes that
+/// already sit strictly inside the positive octant: they produce
+/// `delta == [0.0; 3]` and the repair is a no-op (idempotency
+/// signal: `vertices_translated == 0`).
+///
+/// The `margin` argument is clamped: non-finite or negative values
+/// fall back to [`DEFAULT_POSITIVE_OCTANT_MARGIN`]. Pass `0.0` for
+/// "translate so `min[i] == 0` exactly" (this fails the spec's
+/// strict-nonzero half — useful only when the caller intends to
+/// add their own margin later, or when running the validate-
+/// module's positive-octant rule with the spec interpreted as
+/// `>= 0` rather than `> 0`).
+///
+/// ## Per-vertex handling
+///
+/// Only finite components are translated. A vertex slot
+/// `[NaN, 1.0, 2.0]` becomes `[NaN, 1.0 + delta[1], 2.0 + delta[2]]`
+/// — the non-finite component is passed through. A vertex slot
+/// whose three components are *all* non-finite is left bit-for-bit
+/// unchanged and contributes to
+/// [`TranslateOctantReport::skipped_non_finite_vertices`] instead
+/// of [`TranslateOctantReport::vertices_translated`].
+///
+/// ## Per-primitive handling
+///
+/// - Walks every `Triangles` primitive in source order.
+///   Non-`Triangles` primitives are silently skipped (the rest of
+///   the crate already rejects them at encode-time anyway).
+/// - Both indexed and unindexed primitives translate every
+///   `prim.positions` slot once — this is the buffer the slots
+///   reference, regardless of how the index buffer routes through
+///   it. Index buffers are not rewritten.
+/// - `prim.normals` are *direction* vectors, not positions, so they
+///   are left untouched (the validate-module's facet-orientation
+///   rule still holds after a pure translation).
+/// - `prim.extras`, `mesh.name`, the scene-graph `nodes` /
+///   `roots`, and every non-position vertex attribute (tangents,
+///   uvs, colours, joints, weights, morph targets) are preserved.
+///
+/// ## Empty / degenerate scenes
+///
+/// A scene with no `Triangles` primitives — or one whose every
+/// `Triangles` primitive has zero positions — has no bbox to anchor
+/// against and is a no-op (`delta == [0.0; 3]`,
+/// `vertices_translated == 0`). A scene whose every position
+/// component is non-finite is also a no-op (no axis contributes a
+/// finite minimum); the repair reports the non-finite-skip count
+/// instead.
+///
+/// Returns a single [`TranslateOctantReport`] summed across every
+/// touched primitive.
+pub fn repair_translate_to_positive_octant(
+    scene: &mut Scene3D,
+    margin: f32,
+) -> TranslateOctantReport {
+    let mut report = TranslateOctantReport::default();
+    // Match the validate-module clamp idiom: non-finite / negative
+    // margins fall back to the documented default rather than
+    // panicking. Strict-zero (`0.0`) is still legal — see the doc
+    // comment for the rationale.
+    let margin = if margin.is_finite() && margin >= 0.0 {
+        margin
+    } else {
+        DEFAULT_POSITIVE_OCTANT_MARGIN
+    };
+
+    // Count inspected triangles up-front so the report mirrors the
+    // other repairs even when the early-exit branch fires.
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            report.triangles_inspected += face_count;
+        }
+    }
+
+    // Compute the per-axis minimum over every finite position
+    // component across every `Triangles` primitive. Mirrors the
+    // selection rule used by `crate::validate::bbox`.
+    let mut mn = [f32::INFINITY; 3];
+    let mut any_axis_finite = [false; 3];
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            for p in &prim.positions {
+                for (axis, &c) in p.iter().enumerate() {
+                    if c.is_finite() {
+                        if c < mn[axis] {
+                            mn[axis] = c;
+                        }
+                        any_axis_finite[axis] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // If no finite components exist anywhere, there's nothing to
+    // anchor a translation against. Walk vertices once to populate
+    // `skipped_non_finite_vertices` and return.
+    if !any_axis_finite.iter().any(|&f| f) {
+        for mesh in &scene.meshes {
+            for prim in &mesh.primitives {
+                if prim.topology != Topology::Triangles {
+                    continue;
+                }
+                for p in &prim.positions {
+                    if !p.iter().any(|c| c.is_finite()) {
+                        report.skipped_non_finite_vertices += 1;
+                    }
+                }
+            }
+        }
+        return report;
+    }
+
+    // Per-axis: shift only when the existing minimum violates the
+    // spec's strict-`> 0` rule, i.e. `mn[axis] <= 0`. The margin's
+    // role is purely to ensure the post-shift minimum lands
+    // strictly *above* zero (the spec says "nonnegative AND nonzero")
+    // — not to enforce any particular distance from zero. A scene
+    // whose minimum is already at `+1e-30` is left alone even though
+    // it's well below the default margin: the spec's invariant is
+    // already satisfied. The strict-`<= 0` test is what makes the
+    // pass idempotent: after the shift the new minimum lands at
+    // `+margin` (or a sub-ULP residual after `f32` cancellation, but
+    // still strictly above zero on typical scenes), and a re-run sees
+    // a strictly-positive minimum and does nothing. (The
+    // `mn[axis] == +INFINITY` no-finite-component case is also
+    // skipped because `+INFINITY <= 0` is false.)
+    let mut delta = [0.0f32; 3];
+    for axis in 0..3 {
+        if any_axis_finite[axis] && mn[axis] <= 0.0 {
+            delta[axis] = margin - mn[axis];
+        }
+    }
+    report.delta = delta;
+
+    // No-op early-exit: scene already sits strictly above the
+    // margin on every axis. Walk-and-count of non-finite vertices
+    // still runs so the report is symmetric with the apply branch.
+    if delta == [0.0; 3] {
+        for mesh in &scene.meshes {
+            for prim in &mesh.primitives {
+                if prim.topology != Topology::Triangles {
+                    continue;
+                }
+                for p in &prim.positions {
+                    if !p.iter().any(|c| c.is_finite()) {
+                        report.skipped_non_finite_vertices += 1;
+                    }
+                }
+            }
+        }
+        return report;
+    }
+
+    // Apply the translation. Per-component: only finite components
+    // are shifted; non-finite components are passed through.
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            for p in &mut prim.positions {
+                if !p.iter().any(|c| c.is_finite()) {
+                    report.skipped_non_finite_vertices += 1;
+                    continue;
+                }
+                let mut shifted = false;
+                for axis in 0..3 {
+                    if p[axis].is_finite() && delta[axis] != 0.0 {
+                        p[axis] += delta[axis];
+                        shifted = true;
+                    }
+                }
+                if shifted {
+                    report.vertices_translated += 1;
+                }
+            }
+        }
+    }
+
+    report
+}
+
 /// Internal collected-triangle representation used by [`shells`].
 struct CollectedTri {
     locator: FaceLocator,
@@ -2377,5 +2658,199 @@ mod tests {
         let mut sorted = zs.clone();
         sorted.sort_by(f32::total_cmp);
         assert_eq!(zs, sorted);
+    }
+
+    // ---- translate_to_positive_octant ----------------------------------
+
+    fn triangle_with_corner(c: [f32; 3]) -> Primitive {
+        // Triangle whose first corner is `c` and other two corners are
+        // axis-aligned offsets so the bbox covers a unit step on each
+        // axis above `c`. Useful for pinning bbox.min == c.
+        soup_from_faces(&[[c, [c[0] + 1.0, c[1], c[2]], [c[0], c[1] + 1.0, c[2]]]])
+    }
+
+    #[test]
+    fn translate_octant_shifts_negative_corner_into_positive() {
+        let mut scene = scene_with_primitives(vec![triangle_with_corner([-2.0, -3.0, -4.0])]);
+        let r = repair_translate_to_positive_octant(&mut scene, 0.0);
+        // delta should be exactly `-min` on each axis (margin = 0).
+        assert_eq!(r.delta, [2.0, 3.0, 4.0]);
+        assert_eq!(r.triangles_inspected, 1);
+        // Three corners on the only triangle.
+        assert_eq!(r.vertices_translated, 3);
+        assert_eq!(r.skipped_non_finite_vertices, 0);
+        // Post-condition: bbox.min lands at 0 on every axis.
+        let bbox = crate::validate::bbox(&scene).expect("scene has finite verts");
+        assert_eq!(bbox.min, [0.0, 0.0, 0.0]);
+        assert_eq!(bbox.max, [-1.0 + 2.0, -2.0 + 3.0, -4.0 + 4.0]);
+    }
+
+    #[test]
+    fn translate_octant_default_margin_clears_strict_nonzero() {
+        let mut scene = scene_with_primitives(vec![triangle_with_corner([0.0, 0.0, 0.0])]);
+        let r = repair_translate_to_positive_octant(&mut scene, DEFAULT_POSITIVE_OCTANT_MARGIN);
+        // Every axis had min == 0, so each one gets bumped by the margin.
+        assert_eq!(
+            r.delta,
+            [
+                DEFAULT_POSITIVE_OCTANT_MARGIN,
+                DEFAULT_POSITIVE_OCTANT_MARGIN,
+                DEFAULT_POSITIVE_OCTANT_MARGIN
+            ]
+        );
+        let bbox = crate::validate::bbox(&scene).unwrap();
+        assert!(bbox.min[0] > 0.0 && bbox.min[1] > 0.0 && bbox.min[2] > 0.0);
+        // The validate-module's positive-octant rule should now report
+        // zero defects under default margin.
+        let opts = crate::validate::ValidationOptions {
+            check_positive_octant: true,
+            ..Default::default()
+        };
+        let rep = crate::validate::validate(&scene, &opts);
+        assert_eq!(
+            rep.positive_octant_defects, 0,
+            "expected zero defects after repair, got {rep:?}"
+        );
+    }
+
+    #[test]
+    fn translate_octant_idempotent_on_already_positive_scene() {
+        // Smallest corner already well above any reasonable margin.
+        let mut scene = scene_with_primitives(vec![triangle_with_corner([10.0, 20.0, 30.0])]);
+        let r = repair_translate_to_positive_octant(&mut scene, DEFAULT_POSITIVE_OCTANT_MARGIN);
+        assert_eq!(r.delta, [0.0, 0.0, 0.0]);
+        assert_eq!(r.vertices_translated, 0);
+        let bbox = crate::validate::bbox(&scene).unwrap();
+        assert_eq!(bbox.min, [10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn translate_octant_second_pass_is_noop() {
+        let mut scene = scene_with_primitives(vec![triangle_with_corner([-5.0, -1.0, -2.0])]);
+        let _first =
+            repair_translate_to_positive_octant(&mut scene, DEFAULT_POSITIVE_OCTANT_MARGIN);
+        let second =
+            repair_translate_to_positive_octant(&mut scene, DEFAULT_POSITIVE_OCTANT_MARGIN);
+        assert_eq!(second.delta, [0.0, 0.0, 0.0]);
+        assert_eq!(second.vertices_translated, 0);
+    }
+
+    #[test]
+    fn translate_octant_negative_margin_clamps_to_default() {
+        let mut scene = scene_with_primitives(vec![triangle_with_corner([-1.0, -1.0, -1.0])]);
+        let r = repair_translate_to_positive_octant(&mut scene, -42.0);
+        // Clamps to the default margin, so post-shift min is +margin.
+        for axis in 0..3 {
+            let expected = DEFAULT_POSITIVE_OCTANT_MARGIN + 1.0;
+            assert!(
+                (r.delta[axis] - expected).abs() < 1e-9,
+                "delta[{axis}] = {} ≠ {}",
+                r.delta[axis],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn translate_octant_skips_non_triangles_primitive() {
+        // Build a non-triangles primitive in the all-negative octant —
+        // the repair should walk past it and report zero inspected
+        // triangles + zero delta.
+        let mut prim = Primitive::new(Topology::Points);
+        prim.positions = vec![[-1.0, -2.0, -3.0]];
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_translate_to_positive_octant(&mut scene, DEFAULT_POSITIVE_OCTANT_MARGIN);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.delta, [0.0, 0.0, 0.0]);
+        assert_eq!(r.vertices_translated, 0);
+        // The non-triangles primitive's position is untouched.
+        assert_eq!(
+            scene.meshes[0].primitives[0].positions[0],
+            [-1.0, -2.0, -3.0]
+        );
+    }
+
+    #[test]
+    fn translate_octant_passes_non_finite_components_through() {
+        // Mixed-finite vertex: one component NaN, one component on the
+        // negative side. Repair shifts the finite axis, leaves NaN alone.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[f32::NAN, -1.0, -1.0], [1.0, -1.0, -1.0], [0.0, 0.0, -1.0]];
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_translate_to_positive_octant(&mut scene, 0.0);
+        // delta on axis 0 came from the two finite x values (1.0, 0.0)
+        // — min is 0, margin is 0, so delta.x == 0.
+        // delta on axis 1 came from y mins (-1.0, -1.0, 0.0) → 1.0.
+        // delta on axis 2 from z (-1.0) → 1.0.
+        assert_eq!(r.delta, [0.0, 1.0, 1.0]);
+        // First slot's NaN is preserved.
+        let p0 = scene.meshes[0].primitives[0].positions[0];
+        assert!(p0[0].is_nan(), "expected NaN, got {}", p0[0]);
+        assert_eq!(p0[1], 0.0);
+        assert_eq!(p0[2], 0.0);
+        // Second slot's finite axes all shifted.
+        let p1 = scene.meshes[0].primitives[0].positions[1];
+        assert_eq!(p1, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn translate_octant_skips_all_nonfinite_vertex_slot() {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_translate_to_positive_octant(&mut scene, 0.0);
+        // delta on x = 1.0 (from -1.0 min), y and z stay at 0.
+        assert_eq!(r.delta, [1.0, 0.0, 0.0]);
+        assert_eq!(r.skipped_non_finite_vertices, 1);
+        // 2 of 3 vertices were translated (the all-non-finite one was
+        // skipped); the slot whose only finite axis (x=0.0) needed no
+        // delta on the other two axes still counts as translated
+        // because at least one component (x) was shifted.
+        assert_eq!(r.vertices_translated, 2);
+        // The all-non-finite slot is unchanged bit-for-bit.
+        let p0 = scene.meshes[0].primitives[0].positions[0];
+        assert!(p0[0].is_nan());
+        assert!(p0[1].is_infinite() && p0[1].is_sign_positive());
+        assert!(p0[2].is_infinite() && p0[2].is_sign_negative());
+    }
+
+    #[test]
+    fn translate_octant_empty_scene_is_noop() {
+        let mut scene = Scene3D::new();
+        let r = repair_translate_to_positive_octant(&mut scene, DEFAULT_POSITIVE_OCTANT_MARGIN);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.vertices_translated, 0);
+        assert_eq!(r.skipped_non_finite_vertices, 0);
+        assert_eq!(r.delta, [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn translate_octant_per_axis_independence() {
+        // x already > margin; y straddles 0; z deeply negative — only
+        // y and z should pick up a non-zero delta.
+        let mut scene = scene_with_primitives(vec![triangle_with_corner([5.0, -0.5, -10.0])]);
+        let r = repair_translate_to_positive_octant(&mut scene, 0.0);
+        assert_eq!(r.delta[0], 0.0, "x already in +octant");
+        assert_eq!(r.delta[1], 0.5);
+        assert_eq!(r.delta[2], 10.0);
+    }
+
+    #[test]
+    fn translate_octant_normals_not_modified() {
+        // Translation does not change direction vectors.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]];
+        let n = [0.5_f32, 0.5, 0.5];
+        prim.normals = Some(vec![n; 3]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let _ = repair_translate_to_positive_octant(&mut scene, 0.0);
+        let after = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        for slot in after {
+            assert_eq!(*slot, n);
+        }
     }
 }
