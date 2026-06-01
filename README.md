@@ -467,6 +467,10 @@ The natural pipeline for a freshly-decoded STL scene is:
    in `ValidationOptions` because modern slicers ignore the rule;
    pair it with `check_positive_octant = true` when targeting a
    strict-1989-spec consumer).
+8. `repair_make_winding_consistent` — propagate one canonical
+   winding across every manifold-edge-connected component, flipping
+   any neighbour whose winding disagrees (matches the validate
+   module's `inconsistent_winding_edges` rule, on by default).
 
 ## Ascending-z facet sort (slicer optimisation)
 
@@ -534,6 +538,58 @@ fully-non-finite vertex slots are reported under
 idempotency signal is `vertices_translated == 0` and
 `delta == [0.0; 3]` on a scene already inside the +octant; a second
 pass over the repaired scene is by construction a no-op.
+
+## Make winding consistent (spec mesh-wide invariant)
+
+The 1989 spec's facet-orientation rule (§6.5) says the three vertices
+of every triangle are "listed in counterclockwise order when looking
+at the object from the outside (right-hand rule)" and that the two
+pieces of orientation information "must be consistent".
+`repair_orient_normals_from_winding` handles the *per-facet* case
+(stored normal vs winding); the *mesh-wide* case — every manifold edge
+walked in opposite directions by its two incident triangles — is what
+`repair_make_winding_consistent` is for. It is the matching mutating
+fix-up for the validate module's `inconsistent_winding_edges` rule
+(`ValidationOptions::check_consistent_winding`, on by default):
+
+```rust
+use oxideav_stl::repair_make_winding_consistent;
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+let report = repair_make_winding_consistent(&mut scene);
+```
+
+Per-primitive isolation: each `Triangles` primitive's manifold-edge
+adjacency is walked independently (no cross-primitive adjacency).
+Within a primitive, BFS starts at the first unvisited face — its
+winding is canonical, by definition — and propagates outward across
+every manifold edge (exactly two incident triangles in the same
+primitive). For each BFS edge `(seed_face, neighbour_face)`: if the
+two traverse the shared edge in *opposite* directions the neighbour
+is already consistent; if they traverse it in the *same* direction
+the neighbour is wound backwards and gets flipped. A flip swaps the
+second and third vertex slots (in the index buffer for indexed
+primitives, in `positions` + matching-length `normals` for unindexed
+primitives) — the only data transformation that reverses the
+right-hand-rule cross-product direction.
+
+`WindingConsistencyReport { triangles_inspected, triangles_flipped,
+components_visited, conflicting_edges }` — `triangles_flipped == 0`
+is the idempotency signal. `components_visited` rises with every BFS
+seed even when no flip is needed (one increment per
+manifold-edge-connected component, not an idempotency signal).
+`conflicting_edges` increments when a flip decision would conflict
+with one already propagated through a different BFS path — the
+non-orientable Möbius-strip-like case where no single global winding
+satisfies every edge constraint. Such offenders remain flagged by
+`validate`; re-run it after this pass to surface them.
+
+Stored *facet normals* are NOT recomputed here — flipping the
+winding changes the cross-product direction, so
+`repair_orient_normals_from_winding` is the natural follow-up when
+the stored normal must agree with the new winding. The two passes
+are independent: this one fixes the mesh-wide invariant, the orient
+pass fixes the per-facet invariant.
 
 ## ASCII comment-line tolerance
 

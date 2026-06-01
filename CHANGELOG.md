@@ -9,6 +9,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 205 — `repair_make_winding_consistent(&mut scene)` +
+  `WindingConsistencyReport` carrier in `oxideav_stl::topology`.
+  Mutating fix-up for the validate module's mesh-wide
+  `inconsistent_winding_edges` rule (on by default in
+  `ValidationOptions::check_consistent_winding`, landed in round
+  100). Walks every `Triangles` primitive in isolation, builds the
+  manifold-edge adjacency map (canonical undirected edge → list of
+  incident face indices; exactly-two-incidences edges only —
+  boundary and non-manifold edges left to the watertight rule),
+  then BFS from each unvisited face. The seed face's winding is
+  canonical by definition; for each manifold-edge neighbour, if
+  the two faces walk the shared edge in opposite directions the
+  neighbour is already consistent, if they walk it in the same
+  direction the neighbour is flipped. A flip swaps the second and
+  third vertex slots (in the index buffer for indexed primitives,
+  in `positions` + matching-length `normals` for unindexed
+  primitives) — the only data transformation that reverses the
+  right-hand-rule cross-product direction of a face. The
+  in-progress flip state is incrementally maintained during the
+  BFS so neighbours-of-neighbours see the post-flip orientation;
+  flips are batched and applied to the primitive's buffers at the
+  end so the BFS sees a stable snapshot. Discriminant-preserving:
+  `Indices::U16` stays `U16`, `Indices::U32` stays `U32`; the
+  shared `positions` buffer is left untouched on indexed
+  primitives (only the index entries for the flipped faces are
+  swapped). `WindingConsistencyReport { triangles_inspected,
+  triangles_flipped, components_visited, conflicting_edges }`:
+  `triangles_flipped == 0` is the idempotency signal;
+  `components_visited` rises one per BFS seed regardless of flips
+  (not an idempotency signal); `conflicting_edges` increments when
+  a flip decision would conflict with one already propagated
+  through a different BFS path (the non-orientable
+  Möbius-strip-like case). Non-`Triangles` primitives are silently
+  skipped; `prim.extras`, `mesh.name`, the scene-graph `nodes` /
+  `roots`, the `prim.positions` buffer of indexed primitives, and
+  every non-affected vertex attribute (tangents, uvs, colours,
+  joints, weights, morph targets) are preserved. Stored facet
+  *normals* are NOT recomputed — flipping the winding inverts the
+  cross-product direction, so
+  `repair_orient_normals_from_winding` is the natural follow-up
+  when the stored normal must agree with the new winding (the two
+  passes are independent: this one fixes the mesh-wide invariant,
+  the orient pass fixes the per-facet invariant). 11 unit tests
+  (empty-scene no-op, non-`Triangles` skip, already-consistent
+  quad idempotency, flipped-neighbour flip on unindexed quad +
+  U32-indexed quad + U16-indexed quad with discriminant
+  preservation, normals-swapped-in-lockstep for unindexed,
+  per-component seed counting on disconnected triangles,
+  face-count preservation, extras + mesh-name preservation) and 5
+  integration tests (binary decode → repair → re-validate on a
+  flipped-neighbour quad: 1 inconsistent edge pre-repair → 0
+  post-repair; binary encoder round-trip; face-count preservation
+  through the pipeline; second-pass no-op; clean-quad input is a
+  no-op). Lib-test count rises by 11 (144 → 155); integration-test
+  file count rises by one. The repair surface now covers every
+  diagnostic the validate module exposes for the four spec rules
+  AND the spec's mesh-wide winding invariant:
+  facet-orientation → `repair_orient_normals_from_winding`,
+  unit-normal → `repair_normalize_unit_normals`,
+  vertex-to-vertex → `repair_weld_vertices` +
+  `repair_drop_degenerate_triangles`,
+  positive-octant → `repair_translate_to_positive_octant`,
+  consistent-winding → `repair_make_winding_consistent`.
+
 - Round 199 — `repair_translate_to_positive_octant(&mut scene, margin)`
   + `DEFAULT_POSITIVE_OCTANT_MARGIN` constant + `TranslateOctantReport`
   carrier in `oxideav_stl::topology`. Mutating fix-up for the

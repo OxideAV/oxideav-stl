@@ -54,6 +54,11 @@
 //!    rule (off by default in `ValidationOptions` because most modern
 //!    slicers ignore it; turn both on together when targeting a strict
 //!    1989-spec consumer).
+//! 7. [`repair_make_winding_consistent`] — propagate one
+//!    canonical winding across every manifold-edge-connected
+//!    component, flipping any neighbour whose vertex order disagrees.
+//!    The matching mutating fix-up for the validate module's
+//!    `inconsistent_winding_edges` rule (on by default).
 //!
 //! ## Vertex-equality model
 //!
@@ -1560,6 +1565,354 @@ pub fn repair_translate_to_positive_octant(
     report
 }
 
+/// Outcome of a [`repair_make_winding_consistent`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. `triangles_flipped == 0` is the idempotency signal — a
+/// scene whose every manifold edge is already walked in opposite
+/// directions by its two incident triangles is left untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindingConsistencyReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive.
+    pub triangles_inspected: usize,
+    /// Number of triangles whose vertex order was swapped to align
+    /// their winding with a manifold-edge neighbour's. A scene that
+    /// already passes the validate-module's `inconsistent_winding`
+    /// rule reports `triangles_flipped == 0`.
+    pub triangles_flipped: usize,
+    /// Number of distinct manifold-edge-connected components walked
+    /// by the BFS. Each component picks one seed triangle whose
+    /// winding is taken as canonical and propagated outward; the
+    /// counter is incremented once per such seed.
+    pub components_visited: usize,
+    /// Number of manifold edges (exactly two incident triangles in
+    /// the same primitive) along which winding consistency could not
+    /// be resolved because doing so would conflict with an already-
+    /// propagated decision elsewhere in the component. Mirrors the
+    /// "unable to repair" case for non-orientable surfaces (Möbius-
+    /// strip-like), but is also incremented when a flip would
+    /// invalidate a previously-set face's orientation. Such edges
+    /// remain flagged by [`crate::validate`]; the caller can re-run
+    /// `validate` after this pass to confirm.
+    pub conflicting_edges: usize,
+}
+
+/// Propagate one canonical winding across every manifold-edge-
+/// connected component of every `Triangles` primitive.
+///
+/// The 1989 spec says facet orientation is "specified redundantly in
+/// two ways which must be consistent": (1) the direction of the
+/// normal is outward; (2) the vertices are listed in counter-clockwise
+/// order when viewed from outside (right-hand rule). The per-facet
+/// consistency between *stored normal* and *winding* is handled by
+/// [`repair_orient_normals_from_winding`]; the *mesh-wide* consistency
+/// — every manifold edge walked in opposite directions by its two
+/// incident triangles — is this pass.
+///
+/// [`crate::validate`] surfaces the mesh-wide invariant under
+/// [`crate::ValidationReport::inconsistent_winding_edges`] (on by
+/// default via
+/// [`crate::ValidationOptions::check_consistent_winding`]). This is
+/// the matching mutating fix-up.
+///
+/// ## Algorithm
+///
+/// For each `Triangles` primitive in isolation:
+/// 1. Build a per-primitive map from canonical undirected edge
+///    (lo / hi bit-exact `f32` triples) to the list of incident
+///    `(face_idx, directed-traversal-flag)` entries. Only edges with
+///    exactly two incidences participate; boundary edges (one
+///    incidence) and non-manifold edges (three or more) are left to
+///    the watertight check.
+/// 2. BFS over the manifold-edge adjacency graph. The first
+///    unvisited face in source order is the *seed* for its
+///    component — its current winding is canonical, by definition.
+/// 3. For each BFS edge `(seed_face, neighbour_face)` walking
+///    canonical edge `e`: if `seed_face` and `neighbour_face`
+///    already traverse `e` in opposite directions, the neighbour is
+///    consistent — mark it visited and queue its neighbours. If
+///    they traverse `e` in the *same* direction, the neighbour
+///    needs flipping — swap two of its vertex slots, mark it
+///    visited, and queue.
+/// 4. A "consistency conflict" — a neighbour-of-a-neighbour that
+///    has *already* been visited but disagrees with the decision
+///    propagated through a different path — is recorded under
+///    [`WindingConsistencyReport::conflicting_edges`] and left
+///    alone. Such conflicts arise on non-orientable surfaces
+///    (Möbius-strip-like) where no single global winding satisfies
+///    every edge constraint; the caller should re-run
+///    [`crate::validate`] to surface the remaining offenders.
+///
+/// ## Flip representation
+///
+/// A flip swaps the second and third vertex slots of the offending
+/// face. For an indexed primitive this swaps two entries in the
+/// index buffer; for an unindexed primitive it swaps two entries in
+/// the `prim.positions` (and, when matched 1:1, `prim.normals`)
+/// buffers. Both transformations reverse the right-hand-rule cross
+/// product direction of the face — the geometric meaning of
+/// "flipping the winding".
+///
+/// Stored *facet normals* are NOT recomputed by this pass — flipping
+/// the winding changes the cross-product direction, which means
+/// [`repair_orient_normals_from_winding`] is the natural follow-up
+/// when the stored normal must agree with the new winding. The two
+/// passes are independent: this one fixes the mesh-wide invariant;
+/// the orient pass fixes the per-facet invariant.
+///
+/// ## Per-primitive isolation
+///
+/// Each primitive is walked in isolation — manifold-edge adjacency
+/// across primitives is not modelled. Two primitives that happen to
+/// share a vertex position are treated as separate connected
+/// components, mirroring the validate module's per-primitive edge
+/// accounting. Non-`Triangles` primitives are silently skipped.
+///
+/// ## Empty / degenerate scenes
+///
+/// A scene with no `Triangles` primitives — or one whose every
+/// primitive has zero faces — is a no-op (`triangles_flipped == 0`,
+/// `components_visited == 0`). Degenerate edges (endpoints coincide
+/// by bit-exact match) are skipped, matching the validate module's
+/// edge accounting.
+///
+/// ## Idempotency
+///
+/// A second run sees every manifold edge already walked in opposite
+/// directions and reports `triangles_flipped == 0`. The
+/// `components_visited` count is *not* an idempotency signal — it
+/// rises with every pass (one increment per BFS seed, regardless of
+/// whether a flip was needed).
+///
+/// Returns a single [`WindingConsistencyReport`] summed across every
+/// touched primitive.
+pub fn repair_make_winding_consistent(scene: &mut Scene3D) -> WindingConsistencyReport {
+    let mut report = WindingConsistencyReport::default();
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            make_winding_consistent_in_primitive(prim, &mut report);
+        }
+    }
+    report
+}
+
+/// Per-primitive winding propagation. Builds the edge-adjacency
+/// graph and walks each connected component, flipping any neighbour
+/// whose winding disagrees with the seed.
+fn make_winding_consistent_in_primitive(
+    prim: &mut Primitive,
+    report: &mut WindingConsistencyReport,
+) {
+    use std::collections::{HashMap, VecDeque};
+
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    // Track the canonical direction each face currently walks each
+    // of its three edges. `face_edges[f]` holds three
+    // `(canonical_edge_key, dir_flag)` tuples (or `None` for
+    // degenerate / unresolvable corners). `dir_flag = true` means
+    // the face walks the edge in lo→hi canonical direction, `false`
+    // means hi→lo. A flip swaps two slots, which inverts all three
+    // edges' `dir_flag`s — we recompute on the fly when a face is
+    // flipped.
+    type EdgeKey = (VertKey, VertKey);
+
+    let face_corners = |prim: &Primitive, face_idx: usize| -> Option<[VertKey; 3]> {
+        let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+        let p0 = prim.positions.get(vi0).copied()?;
+        let p1 = prim.positions.get(vi1).copied()?;
+        let p2 = prim.positions.get(vi2).copied()?;
+        Some([VertKey::from(p0), VertKey::from(p1), VertKey::from(p2)])
+    };
+
+    // `dir_flag` for one directed traversal a→b: `true` if a < b
+    // (walks the canonical key in lo→hi direction), `false` if
+    // a > b. Equal keys mean a degenerate edge — caller skips.
+    let edge_of = |a: VertKey, b: VertKey| -> Option<(EdgeKey, bool)> {
+        match a.cmp(&b) {
+            std::cmp::Ordering::Less => Some(((a, b), true)),
+            std::cmp::Ordering::Greater => Some(((b, a), false)),
+            std::cmp::Ordering::Equal => None,
+        }
+    };
+
+    let face_edges_of = |corners: [VertKey; 3]| -> [Option<(EdgeKey, bool)>; 3] {
+        [
+            edge_of(corners[0], corners[1]),
+            edge_of(corners[1], corners[2]),
+            edge_of(corners[2], corners[0]),
+        ]
+    };
+
+    // Build the initial adjacency map: canonical edge → list of
+    // (face_idx, dir_flag) — but the BFS needs `dir_flag` *after*
+    // flips, so we don't pre-cache the per-face state; instead we
+    // store only the adjacency `edge → faces` and recompute the
+    // direction when the BFS reaches the edge.
+    let mut edge_faces: HashMap<EdgeKey, Vec<usize>> = HashMap::new();
+    for face_idx in 0..face_count {
+        let Some(corners) = face_corners(prim, face_idx) else {
+            continue;
+        };
+        for (key, _) in face_edges_of(corners).into_iter().flatten() {
+            edge_faces.entry(key).or_default().push(face_idx);
+        }
+    }
+
+    // Per-face flip flag — incrementally maintained so the BFS can
+    // tell whether `face f`'s current winding is the original or
+    // the flipped one. We DON'T mutate the primitive buffers yet;
+    // we batch the flips at the end so the BFS sees a consistent
+    // snapshot of every face's direction.
+    let mut flipped = vec![false; face_count];
+    let mut visited = vec![false; face_count];
+
+    // Helper: the directed traversal flag of `face_idx` on
+    // canonical edge `key`, taking the in-progress flip state into
+    // account.
+    let face_dir_on_edge = |corners: &[[VertKey; 3]],
+                            flipped: &[bool],
+                            face_idx: usize,
+                            target: EdgeKey|
+     -> Option<bool> {
+        let mut c = corners[face_idx];
+        if flipped[face_idx] {
+            // Swap slots 1 and 2 to invert the winding.
+            c.swap(1, 2);
+        }
+        for slot in face_edges_of(c).iter().flatten() {
+            if slot.0 == target {
+                return Some(slot.1);
+            }
+        }
+        None
+    };
+
+    // Cache every face's original corners up front. `face_corners`
+    // returns `None` on resolve failure (out-of-range index); cache
+    // an all-same sentinel that produces zero edges so the BFS skips
+    // it harmlessly.
+    let sentinel = VertKey(u32::MAX, u32::MAX, u32::MAX);
+    let mut corners: Vec<[VertKey; 3]> = Vec::with_capacity(face_count);
+    for face_idx in 0..face_count {
+        corners.push(face_corners(prim, face_idx).unwrap_or([sentinel; 3]));
+    }
+
+    // BFS from each unvisited face. The seed's current orientation
+    // is canonical; neighbours that disagree are flipped.
+    for seed in 0..face_count {
+        if visited[seed] {
+            continue;
+        }
+        visited[seed] = true;
+        report.components_visited += 1;
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        queue.push_back(seed);
+        while let Some(face_idx) = queue.pop_front() {
+            // Re-evaluate this face's three edges under the current
+            // flip state and walk each one's manifold partner.
+            let mut c = corners[face_idx];
+            if flipped[face_idx] {
+                c.swap(1, 2);
+            }
+            for slot in face_edges_of(c).iter().flatten() {
+                let key = slot.0;
+                let this_dir = slot.1;
+                let Some(faces) = edge_faces.get(&key) else {
+                    continue;
+                };
+                // Manifold-only: exactly two incident triangles.
+                if faces.len() != 2 {
+                    continue;
+                }
+                let neighbour = if faces[0] == face_idx {
+                    faces[1]
+                } else if faces[1] == face_idx {
+                    faces[0]
+                } else {
+                    // `face_idx` doesn't actually own this edge in
+                    // the adjacency (e.g. duplicate edges within
+                    // one face after a sentinel); skip.
+                    continue;
+                };
+                let Some(neigh_dir) = face_dir_on_edge(&corners, &flipped, neighbour, key) else {
+                    continue;
+                };
+                if visited[neighbour] {
+                    // The neighbour's orientation is already
+                    // fixed. If it disagrees with this face on the
+                    // shared edge, that's a non-orientable
+                    // conflict.
+                    if neigh_dir == this_dir {
+                        report.conflicting_edges += 1;
+                    }
+                    continue;
+                }
+                // Unvisited neighbour. Same direction = needs flip;
+                // opposite direction = already consistent.
+                if neigh_dir == this_dir {
+                    flipped[neighbour] = true;
+                }
+                visited[neighbour] = true;
+                queue.push_back(neighbour);
+            }
+        }
+    }
+
+    // Apply the flips. Each flipped face has its second and third
+    // vertex slots swapped — index buffer or position/normal arrays.
+    let to_flip: Vec<usize> = flipped
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &f)| if f { Some(i) } else { None })
+        .collect();
+    if to_flip.is_empty() {
+        return;
+    }
+    report.triangles_flipped += to_flip.len();
+    match &mut prim.indices {
+        Some(Indices::U16(v)) => {
+            for &face_idx in &to_flip {
+                let b = face_idx * 3;
+                v.swap(b + 1, b + 2);
+            }
+        }
+        Some(Indices::U32(v)) => {
+            for &face_idx in &to_flip {
+                let b = face_idx * 3;
+                v.swap(b + 1, b + 2);
+            }
+        }
+        None => {
+            let normals_match = prim
+                .normals
+                .as_ref()
+                .map(|ns| ns.len() == prim.positions.len())
+                .unwrap_or(false);
+            for &face_idx in &to_flip {
+                let b = face_idx * 3;
+                prim.positions.swap(b + 1, b + 2);
+                if normals_match {
+                    if let Some(ns) = prim.normals.as_mut() {
+                        ns.swap(b + 1, b + 2);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Internal collected-triangle representation used by [`shells`].
 struct CollectedTri {
     locator: FaceLocator,
@@ -2852,5 +3205,298 @@ mod tests {
         for slot in after {
             assert_eq!(*slot, n);
         }
+    }
+
+    // -- repair_make_winding_consistent --------------------------------
+
+    /// Build the two-triangle "flipped-neighbour quad" the validate
+    /// module uses to exercise its `inconsistent_winding` rule. Tri 0
+    /// is canonically wound; tri 1 walks the shared diagonal in the
+    /// SAME direction as tri 0 (rather than the opposite direction a
+    /// consistent quad would walk). The pass should flip tri 1.
+    fn flipped_neighbour_quad_unindexed() -> Primitive {
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            // tri 0 — CCW around +Z, walks the diagonal (1,1,0)→(0,0,0)
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            // tri 1 — also walks the diagonal (1,1,0)→(0,0,0) (same
+            // direction as tri 0 → inconsistent)
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 6]);
+        prim
+    }
+
+    #[test]
+    fn winding_consistency_empty_scene_is_noop() {
+        let mut scene = Scene3D::new();
+        let r = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r, WindingConsistencyReport::default());
+    }
+
+    #[test]
+    fn winding_consistency_no_triangles_primitive_skipped() {
+        // A primitive with non-Triangles topology is silently skipped.
+        let mut prim = Primitive::new(Topology::Lines);
+        prim.positions = vec![[0.0, 0.0, 0.0]; 6];
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.triangles_flipped, 0);
+        assert_eq!(r.components_visited, 0);
+    }
+
+    #[test]
+    fn winding_consistency_already_consistent_quad_is_idempotent() {
+        // Same two triangles, but tri 1 is wound the correct way —
+        // walks the diagonal (0,0,0)→(1,1,0), opposite to tri 0.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 6]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let pre_positions = scene.meshes[0].primitives[0].positions.clone();
+        let r = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r.triangles_inspected, 2);
+        assert_eq!(r.triangles_flipped, 0);
+        // Each connected component picks one seed.
+        assert_eq!(r.components_visited, 1);
+        assert_eq!(r.conflicting_edges, 0);
+        assert_eq!(scene.meshes[0].primitives[0].positions, pre_positions);
+    }
+
+    #[test]
+    fn winding_consistency_flips_flipped_neighbour_unindexed() {
+        let mut scene = scene_with_primitives(vec![flipped_neighbour_quad_unindexed()]);
+
+        // Pre-condition: validate flags 1 inconsistent edge.
+        let pre = crate::validate(
+            &scene,
+            &crate::ValidationOptions {
+                check_facet_orientation: false,
+                check_unit_normal: false,
+                ..crate::ValidationOptions::default()
+            },
+        );
+        assert_eq!(pre.inconsistent_winding_edges, 1);
+
+        let r = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r.triangles_inspected, 2);
+        assert_eq!(r.triangles_flipped, 1, "report: {r:?}");
+        assert_eq!(r.components_visited, 1);
+        assert_eq!(r.conflicting_edges, 0);
+
+        // Post-condition: validate flags zero inconsistent edges.
+        let post = crate::validate(
+            &scene,
+            &crate::ValidationOptions {
+                check_facet_orientation: false,
+                check_unit_normal: false,
+                ..crate::ValidationOptions::default()
+            },
+        );
+        assert_eq!(post.inconsistent_winding_edges, 0, "post: {post:?}");
+
+        // Tri 1's second and third slots were swapped: the original
+        // [1,1,0] [0,0,0] [0,1,0] becomes [1,1,0] [0,1,0] [0,0,0].
+        let pos = &scene.meshes[0].primitives[0].positions;
+        assert_eq!(pos[3], [1.0, 1.0, 0.0]);
+        assert_eq!(pos[4], [0.0, 1.0, 0.0]);
+        assert_eq!(pos[5], [0.0, 0.0, 0.0]);
+
+        // Idempotency: a second run is a no-op.
+        let r2 = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r2.triangles_flipped, 0);
+    }
+
+    #[test]
+    fn winding_consistency_flips_flipped_neighbour_indexed_u32() {
+        // Indexed variant: one shared position buffer for the two
+        // triangles (4 unique corners), index buffer carries the
+        // flipped second face.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0], // 0
+            [1.0, 0.0, 0.0], // 1
+            [1.0, 1.0, 0.0], // 2
+            [0.0, 1.0, 0.0], // 3
+        ];
+        // tri 0: 0,1,2 walks diagonal 2→0.
+        // tri 1 flipped: 2,0,3 also walks 2→0 (inconsistent).
+        prim.indices = Some(Indices::U32(vec![0, 1, 2, 2, 0, 3]));
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 4]);
+        let mut scene = scene_with_primitives(vec![prim]);
+
+        let r = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r.triangles_flipped, 1);
+
+        // Indices' second face was swapped: 2,0,3 → 2,3,0.
+        match &scene.meshes[0].primitives[0].indices {
+            Some(Indices::U32(v)) => {
+                assert_eq!(v.as_slice(), &[0, 1, 2, 2, 3, 0]);
+            }
+            other => panic!("expected U32 indices, got {other:?}"),
+        }
+        // Position buffer is untouched (indexed: flip rewrites only the
+        // index buffer).
+        let pos = &scene.meshes[0].primitives[0].positions;
+        assert_eq!(pos[0], [0.0, 0.0, 0.0]);
+        assert_eq!(pos[1], [1.0, 0.0, 0.0]);
+        assert_eq!(pos[2], [1.0, 1.0, 0.0]);
+        assert_eq!(pos[3], [0.0, 1.0, 0.0]);
+
+        // Discriminant preserved.
+        assert!(matches!(
+            scene.meshes[0].primitives[0].indices,
+            Some(Indices::U32(_))
+        ));
+    }
+
+    #[test]
+    fn winding_consistency_flips_flipped_neighbour_indexed_u16() {
+        // U16 discriminant must be preserved on flip.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        prim.indices = Some(Indices::U16(vec![0, 1, 2, 2, 0, 3]));
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 4]);
+        let mut scene = scene_with_primitives(vec![prim]);
+
+        let r = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r.triangles_flipped, 1);
+
+        match &scene.meshes[0].primitives[0].indices {
+            Some(Indices::U16(v)) => assert_eq!(v.as_slice(), &[0, 1, 2, 2, 3, 0]),
+            other => panic!("expected U16 indices, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn winding_consistency_unindexed_swaps_normals_in_lockstep() {
+        // Per-vertex normals (parallel to positions) get swapped along
+        // with the corner positions on a flip.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            // flipped tri:
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        // Distinct per-vertex normals so the swap is observable.
+        prim.normals = Some(vec![
+            [0.1, 0.0, 0.0],
+            [0.2, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+            // tri 1 — slots 4 (idx in vec = 4) and 5 should swap.
+            [0.4, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.6, 0.0, 0.0],
+        ]);
+        let mut scene = scene_with_primitives(vec![prim]);
+
+        let _ = repair_make_winding_consistent(&mut scene);
+        let ns = scene.meshes[0].primitives[0].normals.as_ref().unwrap();
+        // Tri 0 slots unchanged.
+        assert_eq!(ns[0][0], 0.1);
+        assert_eq!(ns[1][0], 0.2);
+        assert_eq!(ns[2][0], 0.3);
+        // Tri 1's second + third normal slots swapped.
+        assert_eq!(ns[3][0], 0.4);
+        assert_eq!(ns[4][0], 0.6);
+        assert_eq!(ns[5][0], 0.5);
+    }
+
+    #[test]
+    fn winding_consistency_counts_each_component_separately() {
+        // Two disconnected triangles — no shared positions, so each
+        // is its own component with its own seed.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            // tri 0 — origin
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            // tri 1 — far away
+            [10.0, 10.0, 0.0],
+            [11.0, 10.0, 0.0],
+            [10.0, 11.0, 0.0],
+        ];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 6]);
+        let mut scene = scene_with_primitives(vec![prim]);
+
+        let r = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r.triangles_inspected, 2);
+        assert_eq!(r.components_visited, 2);
+        // No shared edges → no flips needed.
+        assert_eq!(r.triangles_flipped, 0);
+    }
+
+    #[test]
+    fn winding_consistency_non_triangles_primitive_skipped() {
+        // Mixed scene: one Triangles primitive (counted) + one
+        // non-Triangles (silently skipped).
+        let mut tris = flipped_neighbour_quad_unindexed();
+        // Hand off the same primitive ID to keep the test focused.
+        let mut other = Primitive::new(Topology::LineStrip);
+        other.positions = vec![[0.0; 3]; 3];
+        // Sanity: the Triangles primitive flips one face.
+        let mut scene = scene_with_primitives(vec![tris.clone(), other]);
+        let r = repair_make_winding_consistent(&mut scene);
+        assert_eq!(r.triangles_inspected, 2, "only Triangles counted");
+        assert_eq!(r.triangles_flipped, 1);
+        // (silence the unused-mut warning by referring to `tris` after.)
+        tris.positions.clear();
+    }
+
+    #[test]
+    fn winding_consistency_unindexed_doesnt_change_facecount() {
+        // Pure invariant: flipping a face never adds or removes a
+        // triangle. positions.len() / 3 stays constant.
+        let mut scene = scene_with_primitives(vec![flipped_neighbour_quad_unindexed()]);
+        let before = scene.meshes[0].primitives[0].positions.len();
+        let _ = repair_make_winding_consistent(&mut scene);
+        let after = scene.meshes[0].primitives[0].positions.len();
+        assert_eq!(before, after);
+        assert_eq!(after / 3, 2);
+    }
+
+    #[test]
+    fn winding_consistency_preserves_extras_and_mesh_name() {
+        // Extras and mesh name pass through untouched.
+        use serde_json::json;
+        let mut prim = flipped_neighbour_quad_unindexed();
+        prim.extras
+            .insert("custom".to_string(), json!("preserve-me"));
+        let mut mesh = Mesh::new(Some("widget".to_string()));
+        mesh.primitives.push(prim);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(mesh);
+
+        let _ = repair_make_winding_consistent(&mut scene);
+        assert_eq!(
+            scene.meshes[0].primitives[0]
+                .extras
+                .get("custom")
+                .and_then(|v| v.as_str()),
+            Some("preserve-me"),
+        );
+        assert_eq!(scene.meshes[0].name.as_deref(), Some("widget"));
     }
 }
