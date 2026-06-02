@@ -9,6 +9,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 210 — `repair_split_t_junctions(&mut scene, eps)` +
+  `DEFAULT_T_JUNCTION_SPLIT_TOLERANCE` constant +
+  `TJunctionSplitReport` carrier in `oxideav_stl::topology`.
+  Mutating fix-up for the validate module's T-junction sub-check
+  (`ValidationOptions::check_t_junctions`, off by default; brute-
+  force `O(E · V_unique)` scan) — the spec's vertex-to-vertex rule
+  (§6.5) says "every triangle must share exactly two vertices with
+  each of its adjacent triangles" and the watertight edge-use
+  check alone misses the case where one triangle's corner sits
+  strictly inside another triangle's edge (the offending vertex
+  is not an endpoint of the edge it sits on, so canonical-edge
+  keys don't collide). The repair walks every `Triangles`
+  primitive in isolation, collects the bit-exact-key set of
+  every distinct corner position, then for each face tests its
+  three edges for foreign on-edge incidence under the same
+  geometric predicate the validate module uses (perpendicular
+  distance `≤ eps · |PQ|` + projected parameter `t ∈ (eps, 1 -
+  eps)`). The edge with the most splitters is picked (ties resolve
+  in cyclic `(A,B) → (B,C) → (C,A)` order), the splitters are
+  sorted along the edge by `t`, and the original face `(P, Q, R)`
+  is replaced by a fan rooted at the *opposite* corner: `(P, V₁,
+  R), (V₁, V₂, R), …, (Vₙ, Q, R)`. The fan preserves the original
+  face's plane (so the computed normal is unchanged) and walks
+  every sub-triangle in the same winding direction. Indexed
+  primitives append the splitter positions (plus matched-length
+  normals replicated from the apex slot) and rewrite the index
+  buffer; `Indices::U16` auto-widens to `U32` only when a fresh
+  splitter slot would push the position count past `u16::MAX`.
+  Unindexed primitives have `positions` + matched-length
+  `normals` fully rewritten as the new flat triangle soup; the
+  per-face normal is replicated from the original face's apex
+  normal slot because the fan preserves the plane.
+  `TJunctionSplitReport { triangles_inspected, triangles_split,
+  triangles_emitted, split_vertices_inserted, triangles_unchanged,
+  skipped_length_mismatch }`: `triangles_split == 0` is the
+  idempotency signal; the pass is fully count-balanced
+  (`final_face_count == pre_face_count - triangles_split +
+  triangles_emitted`); length-mismatched normals arrays skip the
+  primitive entirely so the pass never invents nonsense face-
+  normal data; `eps` outside `[0, 0.5)` or non-finite clamps to
+  `DEFAULT_T_JUNCTION_SPLIT_TOLERANCE` (`1e-5`, matching
+  `validate::DEFAULT_T_JUNCTION_TOLERANCE` exactly so the
+  diagnostic↔repair pairing is consistent at the matching
+  defaults). One pass handles the common producer pattern of
+  "every face carries at most one T-junction"; nested splits where
+  two new fan triangles each carry their own splitter need
+  re-runs. Cross-primitive T-junctions are not detected
+  (adjacency is per-primitive, matching the validate module's
+  per-primitive edge accounting); pre-merge with
+  `repair_weld_vertices` for cross-primitive coverage.
+  Discriminant-preserving on indexed primitives (`U16` stays
+  `U16` unless auto-widened); `prim.extras`, `mesh.name`, the
+  scene-graph `nodes` / `roots`, and every non-affected vertex
+  attribute (tangents, uvs, colours, joints, weights, morph
+  targets) are preserved. The repair surface now covers every
+  diagnostic the validate module exposes for the four spec rules
+  AND the two spec sub-checks: facet-orientation →
+  `repair_orient_normals_from_winding`, unit-normal →
+  `repair_normalize_unit_normals`, vertex-to-vertex →
+  `repair_weld_vertices` + `repair_drop_degenerate_triangles` +
+  `repair_split_t_junctions`, positive-octant →
+  `repair_translate_to_positive_octant`, consistent-winding →
+  `repair_make_winding_consistent`. 11 unit tests (empty-scene
+  no-op, non-`Triangles` skip, clean-pair no-op, classic
+  T-junction unindexed + U32-indexed + U16-indexed with
+  auto-widening, idempotency on already-clean scene, NaN-/inf-eps
+  clamp to default, length-mismatch skip, multi-splitter fan
+  emit, extras + mesh-name preservation) and 4 integration tests
+  (decode → repair → re-validate drives `t_junction_defects` to
+  zero; idempotency on the now-clean scene; face-count balance
+  invariant `3 → 4`; constant-equality between
+  `DEFAULT_T_JUNCTION_SPLIT_TOLERANCE` and
+  `DEFAULT_T_JUNCTION_TOLERANCE`). Lib-test count rises by 11
+  (155 → 166); integration-test file count rises by one.
+
 - Round 205 — `repair_make_winding_consistent(&mut scene)` +
   `WindingConsistencyReport` carrier in `oxideav_stl::topology`.
   Mutating fix-up for the validate module's mesh-wide

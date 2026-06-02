@@ -471,6 +471,13 @@ The natural pipeline for a freshly-decoded STL scene is:
    winding across every manifold-edge-connected component, flipping
    any neighbour whose winding disagrees (matches the validate
    module's `inconsistent_winding_edges` rule, on by default).
+9. `repair_split_t_junctions` — split every triangle edge whose
+   interior is shared with another triangle's corner (matches the
+   validate module's `t_junction_defects` sub-check, off by default
+   in `ValidationOptions` because the brute-force scan is expensive
+   on large meshes; turn it on together with the opt-in
+   `check_t_junctions` rule when interoperating with strict
+   vertex-to-vertex consumers).
 
 ## Ascending-z facet sort (slicer optimisation)
 
@@ -590,6 +597,77 @@ winding changes the cross-product direction, so
 the stored normal must agree with the new winding. The two passes
 are independent: this one fixes the mesh-wide invariant, the orient
 pass fixes the per-facet invariant.
+
+## Split T-junctions (spec vertex-to-vertex invariant)
+
+The 1989 spec's vertex-to-vertex rule (§6.5) says "every triangle must
+share exactly two vertices with each of its adjacent triangles" — i.e.
+no corner of one triangle may lie strictly *inside* an edge of another.
+`ValidationOptions::check_t_junctions` (off by default; brute-force
+`O(E · V_unique)` scan) flags every such incidence under
+`t_junction_defects`; `repair_split_t_junctions` is the matching
+mutating fix-up:
+
+```rust
+use oxideav_stl::{repair_split_t_junctions, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE};
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+let report = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+```
+
+Per-`Triangles`-primitive isolation. For each face `(A, B, C)`, the
+pass tests every other distinct corner key in the same primitive for
+strict on-edge incidence against each of the three edges (under the
+same tolerance the validate module uses, so a scene that detects-
+and-repairs-and-re-detects at the matching defaults is consistent).
+The edge with the most foreign splitters is picked (ties resolve in
+cyclic `(A,B) → (B,C) → (C,A)` order); the original face is then
+replaced by a fan rooted at the *opposite* corner — for an edge
+`(P, Q)` with splitters `V₁ … Vₙ` sorted by their parameter `t ∈
+(0, 1)`, the face `(P, Q, R)` becomes the sequence `(P, V₁, R),
+(V₁, V₂, R), …, (Vₙ, Q, R)`. The fan preserves the original face's
+plane (so its computed normal is identical) and walks every
+sub-triangle in the same winding direction.
+
+`TJunctionSplitReport { triangles_inspected, triangles_split,
+triangles_emitted, split_vertices_inserted, triangles_unchanged,
+skipped_length_mismatch }` — `triangles_split == 0` is the
+idempotency signal. Faces with no splitters land in
+`triangles_unchanged`; the pass is fully count-balanced
+(`final_face_count == pre_face_count - triangles_split +
+triangles_emitted`).
+
+Indexed primitives have their splitter positions appended to
+`prim.positions` (and `prim.normals` when length-matched) and a new
+index buffer emitted. The `Indices::U16` / `Indices::U32`
+discriminant is preserved as long as the resulting maximum index
+still fits — `U16` auto-widens to `U32` only when a fresh splitter
+slot would push the position count past `u16::MAX`. Unindexed
+primitives have `prim.positions` (and matched-length `prim.normals`)
+fully rewritten as the new flat triangle soup; the per-face normal
+slot is replicated from the original face's apex normal because the
+fan preserves the plane. Length-mismatched normals arrays — a sign of
+a producer bug — count under `skipped_length_mismatch` and skip the
+primitive entirely so the pass never invents nonsense face-normal
+data.
+
+One pass handles the common producer pattern of "every face carries
+at most one T-junction"; nested splits where two new fan triangles
+each carry their own splitter need re-runs. Re-running on a scene
+that's already passed `validate`'s `check_t_junctions` rule at the
+matching `eps` is a no-op. `eps` outside `[0, 0.5)` or non-finite
+clamps to `DEFAULT_T_JUNCTION_SPLIT_TOLERANCE` (`1e-5`); cross-
+primitive T-junctions are not detected (pre-merge with
+`repair_weld_vertices`).
+
+The repair surface now covers every diagnostic the validate module
+exposes for the four spec rules AND the two spec sub-checks:
+facet-orientation → `repair_orient_normals_from_winding`,
+unit-normal → `repair_normalize_unit_normals`,
+vertex-to-vertex → `repair_weld_vertices` +
+`repair_drop_degenerate_triangles` + `repair_split_t_junctions`,
+positive-octant → `repair_translate_to_positive_octant`,
+consistent-winding → `repair_make_winding_consistent`.
 
 ## ASCII comment-line tolerance
 

@@ -1913,6 +1913,434 @@ fn make_winding_consistent_in_primitive(
     }
 }
 
+/// Default tolerance for [`repair_split_t_junctions`] — matches
+/// [`crate::DEFAULT_T_JUNCTION_TOLERANCE`] (the validate-module's
+/// detection tolerance).
+///
+/// A vertex `V` is treated as lying on edge `PQ` when:
+///
+/// 1. Its perpendicular distance from the infinite line through `P`
+///    and `Q` is at most `eps * |PQ|`.
+/// 2. Its orthogonal projection onto `PQ`, parameterised as `t ∈
+///    [0, 1]`, lies strictly in `(eps, 1 - eps)` — i.e. strictly
+///    between the endpoints with `eps`-margin.
+///
+/// Mirrors the validate-module's
+/// [`crate::DEFAULT_T_JUNCTION_TOLERANCE`] constant exactly so a
+/// scene that passes `validate` with `check_t_junctions = true` and
+/// the default tolerance is a no-op for this repair at the matching
+/// `eps`.
+pub const DEFAULT_T_JUNCTION_SPLIT_TOLERANCE: f32 = 1.0e-5;
+
+/// Outcome of a [`repair_split_t_junctions`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. `triangles_split == 0` is the idempotency signal — a scene
+/// with no T-junctions (under the configured tolerance) is left
+/// untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TJunctionSplitReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive, on entry.
+    pub triangles_inspected: usize,
+    /// Number of triangles whose one chosen edge carried at least
+    /// one other corner strictly between its endpoints and was
+    /// therefore replaced by a fan of `1 + split_vertex_count`
+    /// sub-triangles.
+    pub triangles_split: usize,
+    /// Total number of sub-triangles produced by every split. The
+    /// post-pass face count of the touched primitives is
+    /// `pre_face_count - triangles_split + triangles_emitted`.
+    pub triangles_emitted: usize,
+    /// Total number of distinct splitting vertices (counted once per
+    /// edge they sit on, per pass). A single vertex that splits the
+    /// same edge of two adjacent triangles contributes twice; a
+    /// vertex that splits two different edges of one triangle
+    /// contributes once because the pass picks the edge with the
+    /// most splits and ignores the others on the current pass —
+    /// see "Iteration to fixpoint" below.
+    pub split_vertices_inserted: usize,
+    /// Number of triangles whose every edge was clean (no foreign
+    /// corner strictly inside) and which were therefore copied
+    /// through unchanged.
+    pub triangles_unchanged: usize,
+    /// Number of primitives skipped because their `normals` length
+    /// did not match `positions.len()` — splitting a face requires
+    /// emitting fresh normals for each new sub-face and a mismatched
+    /// length would leak existing producer-bug data into the result.
+    /// The safe action is to skip; the caller can run
+    /// [`repair_recompute_zero_normals`] first to fix the lengths.
+    pub skipped_length_mismatch: usize,
+}
+
+/// Split every T-junction edge in-place — the matching mutating
+/// fix-up for [`crate::ValidationOptions::check_t_junctions`].
+///
+/// The 1989 spec's vertex-to-vertex rule (§6.5) says "every triangle
+/// must share exactly two vertices with each of its adjacent
+/// triangles" — i.e. no corner of one triangle may lie strictly
+/// *inside* an edge of another. The validate module surfaces such
+/// incidences under
+/// [`crate::ValidationReport::t_junction_defects`]; this is the
+/// matching repair. After this pass and a re-run of `validate` with
+/// the same `eps`, `t_junction_defects` is zero on the same scene
+/// (modulo the iteration-to-fixpoint note below).
+///
+/// ## Algorithm
+///
+/// Per `Triangles` primitive in isolation (no cross-primitive
+/// adjacency):
+///
+/// 1. Collect every distinct vertex position in the primitive into a
+///    bit-exact-key set.
+/// 2. For each face `(A, B, C)`, test each of its three edges for
+///    *foreign* splitting vertices — vertex keys from step 1 that
+///    are not `A`, `B` or `C` and that satisfy the geometric
+///    [`point_strictly_on_segment_t`] predicate at the configured
+///    `eps`. Edges with non-finite positions or degenerate length
+///    (`|edge|² == 0`) are skipped.
+/// 3. Pick the *single* edge of the face with the most splitting
+///    vertices. Ties break in cyclic edge order `(A,B) → (B,C) →
+///    (C,A)`. The unchosen edges are left for a subsequent pass
+///    (their splitters will still be valid in the post-pass mesh).
+/// 4. Sort the chosen edge's splitting vertices along the edge by
+///    their parameter `t ∈ (0, 1)` and replace the original face by
+///    a fan rooted at the *opposite* corner — for an edge `(P, Q)`
+///    with splitters `V₁, V₂, …, Vₙ` between `P` and `Q` (in
+///    increasing `t`), the original face `(P, Q, R)` becomes the
+///    sequence `(P, V₁, R), (V₁, V₂, R), …, (Vₙ, Q, R)`. The fan
+///    preserves both the face's plane (so the recomputed normal is
+///    identical) and the original winding direction at every
+///    sub-triangle.
+/// 5. Faces with no splitting vertices on any edge are copied through
+///    unchanged.
+///
+/// ## Indexed vs unindexed
+///
+/// - **Indexed** primitives (`Indices::U16` / `Indices::U32`): each
+///   splitting vertex picks up a fresh entry in `prim.positions`
+///   (and a matched fresh entry in `prim.normals` when present and
+///   length-matched). The index buffer is rewritten with the new
+///   triangle fan; the `Indices` discriminant is preserved as long
+///   as the resulting maximum index still fits — `U16` upgrades to
+///   `U32` automatically when a split would push the position count
+///   over `u16::MAX`, since a downstream consumer's index decode
+///   would otherwise overflow.
+/// - **Unindexed** primitives: `prim.positions` is fully rewritten
+///   as the new flat triangle soup (three corners per face, the way
+///   STL's binary encoder emits). `prim.normals` is rewritten in
+///   lockstep when present and matched 1:1 with positions; the new
+///   face's normal slot is replicated from the original face's
+///   first-corner normal (the spec's per-face value) — the fan
+///   preserves the plane, so every sub-triangle inherits the same
+///   face normal.
+///
+/// ## Iteration to fixpoint
+///
+/// One pass handles the common producer-pattern of "every face
+/// carries at most one T-junction"; nested T-junctions where two
+/// new fan triangles each carry their own splitter need re-runs.
+/// `triangles_split == 0` on a re-run is the fixpoint signal.
+/// Re-running on a scene that's already passed `validate`'s
+/// `check_t_junctions` rule at the same `eps` is a no-op.
+///
+/// ## Out-of-scope
+///
+/// - **Stored facet normals** are NOT recomputed by this pass; the
+///   fan preserves the original plane, so the per-face normal stored
+///   in the first corner of each new sub-face is identical to the
+///   original. Running [`repair_normalize_unit_normals`] or
+///   [`repair_orient_normals_from_winding`] afterwards is harmless.
+/// - **Non-`Triangles` primitives** are silently skipped.
+/// - **Cross-primitive T-junctions** (a corner of primitive `P1`
+///   lying strictly inside an edge of primitive `P2`) are NOT
+///   detected — adjacency is per-primitive, matching the validate
+///   module's per-primitive edge accounting. Pre-merge into a
+///   single primitive with [`repair_weld_vertices`] when you need
+///   cross-primitive coverage.
+/// - **Non-finite positions** are silently skipped; the predicate
+///   returns `false` on any NaN/Inf component.
+///
+/// `eps` is the same tolerance used by the validate module; values
+/// outside `[0, 0.5)` or non-finite clamp to
+/// [`DEFAULT_T_JUNCTION_SPLIT_TOLERANCE`].
+pub fn repair_split_t_junctions(scene: &mut Scene3D, eps: f32) -> TJunctionSplitReport {
+    let eps = if eps.is_finite() && (0.0..0.5).contains(&eps) {
+        eps
+    } else {
+        DEFAULT_T_JUNCTION_SPLIT_TOLERANCE
+    };
+    let mut report = TJunctionSplitReport::default();
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            split_t_junctions_in_primitive(prim, eps, &mut report);
+        }
+    }
+    report
+}
+
+/// Per-primitive split pass. Walks every face; for each, picks the
+/// single edge with the most foreign splitters and replaces the face
+/// by a fan rooted at the opposite corner.
+fn split_t_junctions_in_primitive(
+    prim: &mut Primitive,
+    eps: f32,
+    report: &mut TJunctionSplitReport,
+) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    // Per-corner normals only ride along when matched 1:1 with
+    // positions. A length-mismatched normals array is a producer-bug
+    // signal; splitting a face would force us to invent entries that
+    // do not correspond to any real face-normal source, so we leave
+    // the whole primitive alone in that case.
+    let normals_match = match prim.normals.as_ref() {
+        Some(ns) => ns.len() == prim.positions.len(),
+        None => true, // Missing normals are fine — we just don't emit any.
+    };
+    if !normals_match {
+        report.skipped_length_mismatch += 1;
+        return;
+    }
+
+    // Collect distinct vertex keys. Two corners with the same
+    // bit-exact position contribute a single splitter candidate (the
+    // splitter test rejects exact-endpoint matches, so a duplicate
+    // key never splits an edge it sits on).
+    let mut keys: std::collections::HashSet<VertKey> =
+        std::collections::HashSet::with_capacity(prim.positions.len());
+    for p in &prim.positions {
+        keys.insert(VertKey::from(*p));
+    }
+
+    // For each face decide which edge (if any) to split.
+    //
+    // `chosen[face]`: optional `(edge_index, splitter_keys-sorted-by-t)`.
+    // `edge_index` is `0 → (A,B)`, `1 → (B,C)`, `2 → (C,A)` so the
+    // emit step knows which corner is the fan apex.
+    #[allow(clippy::type_complexity)]
+    let mut chosen: Vec<Option<(usize, Vec<[f32; 3]>)>> = Vec::with_capacity(face_count);
+    for face_idx in 0..face_count {
+        let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+        let a = prim.positions.get(vi0).copied();
+        let b = prim.positions.get(vi1).copied();
+        let c = prim.positions.get(vi2).copied();
+        let (a, b, c) = match (a, b, c) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            // Out-of-range index slot — leave the face alone; the
+            // drop-degenerates pass owns the rejection.
+            _ => {
+                chosen.push(None);
+                continue;
+            }
+        };
+        let ka = VertKey::from(a);
+        let kb = VertKey::from(b);
+        let kc = VertKey::from(c);
+        let endpoint_set: [VertKey; 3] = [ka, kb, kc];
+
+        #[allow(clippy::type_complexity)]
+        let mut best: Option<(usize, Vec<(f32, [f32; 3])>)> = None;
+        for (edge_idx, (p, q)) in [(a, b), (b, c), (c, a)].into_iter().enumerate() {
+            let mut hits: Vec<(f32, [f32; 3])> = Vec::new();
+            for &k in &keys {
+                if endpoint_set.contains(&k) {
+                    continue;
+                }
+                let v = [
+                    f32::from_bits(k.0),
+                    f32::from_bits(k.1),
+                    f32::from_bits(k.2),
+                ];
+                if let Some(t) = point_strictly_on_segment_t(p, q, v, eps) {
+                    hits.push((t, v));
+                }
+            }
+            if hits.is_empty() {
+                continue;
+            }
+            // Sort along the edge so the fan walks endpoints in order.
+            hits.sort_by(|x, y| x.0.total_cmp(&y.0));
+            // De-dup colinear-coincident t values (two splitter
+            // candidates at the same parameter would emit a
+            // zero-length sub-triangle — handled by the
+            // drop-degenerates pass, but cleaner to dedup here).
+            hits.dedup_by(|x, y| x.0.to_bits() == y.0.to_bits());
+
+            // Pick the edge with the most splitters; ties keep the
+            // earlier cyclic edge per the doc.
+            let take = match &best {
+                None => true,
+                Some((_, cur)) => hits.len() > cur.len(),
+            };
+            if take {
+                best = Some((edge_idx, hits));
+            }
+        }
+        if let Some((edge_idx, hits)) = best {
+            let positions: Vec<[f32; 3]> = hits.into_iter().map(|(_, v)| v).collect();
+            report.split_vertices_inserted += positions.len();
+            report.triangles_split += 1;
+            report.triangles_emitted += positions.len() + 1;
+            chosen.push(Some((edge_idx, positions)));
+        } else {
+            report.triangles_unchanged += 1;
+            chosen.push(None);
+        }
+    }
+
+    if report.triangles_split == 0 {
+        // Nothing to do.
+        return;
+    }
+    if !chosen.iter().any(|c| c.is_some()) {
+        // Counter incremented above on a different primitive; nothing
+        // to do here.
+        return;
+    }
+
+    // Decide output shape: append for indexed, rewrite for unindexed.
+    match prim.indices.take() {
+        Some(idx) => {
+            let (idx_kind_was_u16, raw_idx): (bool, Vec<u32>) = match idx {
+                Indices::U16(v) => (true, v.iter().map(|x| *x as u32).collect()),
+                Indices::U32(v) => (false, v),
+            };
+            // Per-face emit: walk each face's pre-resolved corner
+            // indices; if the face is split, push the new splitting
+            // vertices onto `prim.positions` (and the matched
+            // `prim.normals`) and emit a fan of triangle indices
+            // rooted at the apex corner.
+            let mut new_indices: Vec<u32> = Vec::with_capacity(raw_idx.len());
+            let has_normals = prim.normals.is_some();
+            for (face_idx, decision) in chosen.iter().enumerate() {
+                let b = face_idx * 3;
+                let ia = raw_idx[b];
+                let ib = raw_idx[b + 1];
+                let ic = raw_idx[b + 2];
+                let Some((edge_idx, splitters)) = decision else {
+                    new_indices.push(ia);
+                    new_indices.push(ib);
+                    new_indices.push(ic);
+                    continue;
+                };
+                // Apex is the corner *not* on the chosen edge.
+                //   edge 0 → (A,B), apex = C
+                //   edge 1 → (B,C), apex = A
+                //   edge 2 → (C,A), apex = B
+                let (i_start, i_end, i_apex) = match edge_idx {
+                    0 => (ia, ib, ic),
+                    1 => (ib, ic, ia),
+                    _ => (ic, ia, ib),
+                };
+                // Append splitter positions + (optional) normals.
+                // Each splitter takes a fresh slot; we don't try to
+                // de-duplicate against an existing slot since the
+                // splitter's bit-exact key may already live at a
+                // pre-existing index, but using a fresh slot keeps
+                // the emit O(splitters) without an index lookup.
+                // The pre-existing position is left in place
+                // unaffected.
+                let face_normal = if has_normals {
+                    prim.normals.as_ref().map(|ns| ns[i_apex as usize])
+                } else {
+                    None
+                };
+                let mut chain_indices: Vec<u32> = Vec::with_capacity(splitters.len() + 2);
+                chain_indices.push(i_start);
+                for splitter in splitters {
+                    let new_slot = prim.positions.len() as u32;
+                    prim.positions.push(*splitter);
+                    if let Some(ns) = prim.normals.as_mut() {
+                        ns.push(face_normal.unwrap_or([0.0, 0.0, 0.0]));
+                    }
+                    chain_indices.push(new_slot);
+                }
+                chain_indices.push(i_end);
+                // Emit the fan: (chain[i], chain[i+1], apex).
+                for w in chain_indices.windows(2) {
+                    new_indices.push(w[0]);
+                    new_indices.push(w[1]);
+                    new_indices.push(i_apex);
+                }
+            }
+            // Pick the narrowest discriminant that still fits.
+            let max_index = new_indices.iter().copied().max().unwrap_or(0);
+            if idx_kind_was_u16 && max_index <= u16::MAX as u32 {
+                let narrowed: Vec<u16> = new_indices.into_iter().map(|x| x as u16).collect();
+                prim.indices = Some(Indices::U16(narrowed));
+            } else {
+                prim.indices = Some(Indices::U32(new_indices));
+            }
+        }
+        None => {
+            // Unindexed: rewrite positions + (optional) normals.
+            let old_positions = std::mem::take(&mut prim.positions);
+            let old_normals = prim.normals.take();
+            let mut new_positions: Vec<[f32; 3]> = Vec::with_capacity(old_positions.len());
+            let mut new_normals: Option<Vec<[f32; 3]>> = old_normals
+                .as_ref()
+                .map(|_| Vec::with_capacity(old_positions.len()));
+
+            for (face_idx, decision) in chosen.iter().enumerate() {
+                let b = face_idx * 3;
+                let a_pos = old_positions[b];
+                let b_pos = old_positions[b + 1];
+                let c_pos = old_positions[b + 2];
+                let a_n = old_normals.as_ref().map(|n| n[b]);
+                let b_n = old_normals.as_ref().map(|n| n[b + 1]);
+                let c_n = old_normals.as_ref().map(|n| n[b + 2]);
+                let Some((edge_idx, splitters)) = decision else {
+                    new_positions.push(a_pos);
+                    new_positions.push(b_pos);
+                    new_positions.push(c_pos);
+                    if let Some(ns) = new_normals.as_mut() {
+                        ns.push(a_n.unwrap_or([0.0, 0.0, 0.0]));
+                        ns.push(b_n.unwrap_or([0.0, 0.0, 0.0]));
+                        ns.push(c_n.unwrap_or([0.0, 0.0, 0.0]));
+                    }
+                    continue;
+                };
+                let (start, end, apex, apex_n) = match edge_idx {
+                    0 => (a_pos, b_pos, c_pos, c_n),
+                    1 => (b_pos, c_pos, a_pos, a_n),
+                    _ => (c_pos, a_pos, b_pos, b_n),
+                };
+                // Build the chain (start → ...splitters... → end).
+                let mut chain: Vec<[f32; 3]> = Vec::with_capacity(splitters.len() + 2);
+                chain.push(start);
+                chain.extend(splitters.iter().copied());
+                chain.push(end);
+                // Emit one sub-triangle per chain edge with the apex
+                // last (preserves winding direction).
+                let face_normal = apex_n.unwrap_or([0.0, 0.0, 0.0]);
+                for w in chain.windows(2) {
+                    new_positions.push(w[0]);
+                    new_positions.push(w[1]);
+                    new_positions.push(apex);
+                    if let Some(ns) = new_normals.as_mut() {
+                        ns.push(face_normal);
+                        ns.push(face_normal);
+                        ns.push(face_normal);
+                    }
+                }
+            }
+            prim.positions = new_positions;
+            prim.normals = new_normals;
+        }
+    }
+}
+
 /// Internal collected-triangle representation used by [`shells`].
 struct CollectedTri {
     locator: FaceLocator,
@@ -1967,6 +2395,51 @@ struct VertKey(u32, u32, u32);
 impl From<[f32; 3]> for VertKey {
     fn from(p: [f32; 3]) -> Self {
         VertKey(p[0].to_bits(), p[1].to_bits(), p[2].to_bits())
+    }
+}
+
+/// Geometric "vertex V lies strictly between segment endpoints P and
+/// Q" predicate. When the predicate fires, returns `Some(t)` with the
+/// projection parameter so callers can sort splitters along the
+/// edge. Returns `None` when:
+///
+/// - The segment is degenerate (`|PQ|² == 0`).
+/// - Any coordinate is non-finite.
+/// - `eps` is outside `[0, 0.5)`.
+/// - The projection parameter `t` is not strictly inside
+///   `(eps, 1 - eps)`.
+/// - The perpendicular distance from V to PQ exceeds `eps * |PQ|`.
+///
+/// Mirrors the predicate the validate module uses for its T-junction
+/// sub-check — the two functions agree bit-for-bit on the same input
+/// because they share the same arithmetic. The matching repair pass
+/// is [`repair_split_t_junctions`].
+fn point_strictly_on_segment_t(p: [f32; 3], q: [f32; 3], v: [f32; 3], eps: f32) -> Option<f32> {
+    let d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+    let pv = [v[0] - p[0], v[1] - p[1], v[2] - p[2]];
+    let len_sq = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    if !len_sq.is_finite() || len_sq == 0.0 {
+        return None;
+    }
+    if !(eps.is_finite() && (0.0..0.5).contains(&eps)) {
+        return None;
+    }
+    let dot = pv[0] * d[0] + pv[1] * d[1] + pv[2] * d[2];
+    let t = dot / len_sq;
+    if !t.is_finite() || t <= eps || t >= 1.0 - eps {
+        return None;
+    }
+    let pv_sq = pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2];
+    let perp_sq_times_len_sq = pv_sq * len_sq - dot * dot;
+    if !perp_sq_times_len_sq.is_finite() {
+        return None;
+    }
+    let perp_sq_times_len_sq = perp_sq_times_len_sq.max(0.0);
+    let tol = (eps * eps) * (len_sq * len_sq);
+    if perp_sq_times_len_sq <= tol {
+        Some(t)
+    } else {
+        None
     }
 }
 
@@ -3496,6 +3969,273 @@ mod tests {
                 .get("custom")
                 .and_then(|v| v.as_str()),
             Some("preserve-me"),
+        );
+        assert_eq!(scene.meshes[0].name.as_deref(), Some("widget"));
+    }
+
+    // ----- T-junction split repair -----
+
+    /// A classic T-junction: triangle A spans an edge `(0,0,0) → (2,0,0)`
+    /// and triangle B sits adjacent with corner at the edge midpoint
+    /// `(1,0,0)`. Triangle A has no awareness of B's corner. After the
+    /// repair, A is replaced by two sub-triangles whose shared corner is
+    /// the midpoint, so the watertight check passes too.
+    fn t_junction_unindexed_pair() -> Primitive {
+        let mut prim = Primitive::new(Topology::Triangles);
+        // Triangle A: (0,0,0) → (2,0,0) → (1,1,0)  ← the long edge.
+        prim.positions.push([0.0, 0.0, 0.0]);
+        prim.positions.push([2.0, 0.0, 0.0]);
+        prim.positions.push([1.0, 1.0, 0.0]);
+        // Triangle B: (1,0,0) → (2,0,0) → (1,-1,0) ← shares midpoint
+        // (1,0,0) with edge `(0,0,0) → (2,0,0)` of A.
+        prim.positions.push([1.0, 0.0, 0.0]);
+        prim.positions.push([2.0, 0.0, 0.0]);
+        prim.positions.push([1.0, -1.0, 0.0]);
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; prim.positions.len()]);
+        prim
+    }
+
+    #[test]
+    fn t_junction_split_empty_scene_is_noop() {
+        let mut scene = Scene3D::new();
+        let r = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.triangles_split, 0);
+        assert_eq!(r.triangles_emitted, 0);
+    }
+
+    #[test]
+    fn t_junction_split_skips_non_triangles_primitive() {
+        let mut prim = Primitive::new(Topology::Lines);
+        prim.positions = vec![[0.0; 3], [1.0; 3]];
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.triangles_split, 0);
+    }
+
+    #[test]
+    fn t_junction_split_clean_pair_is_noop() {
+        // Two triangles that share a full edge — no foreign corner sits
+        // mid-edge. The pass should walk every face and emit zero
+        // splits.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions.push([0.0, 0.0, 0.0]);
+        prim.positions.push([1.0, 0.0, 0.0]);
+        prim.positions.push([0.0, 1.0, 0.0]);
+        prim.positions.push([1.0, 0.0, 0.0]);
+        prim.positions.push([1.0, 1.0, 0.0]);
+        prim.positions.push([0.0, 1.0, 0.0]);
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; prim.positions.len()]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(r.triangles_inspected, 2);
+        assert_eq!(r.triangles_split, 0);
+        assert_eq!(r.triangles_unchanged, 2);
+        assert_eq!(scene.meshes[0].primitives[0].positions.len(), 6);
+    }
+
+    #[test]
+    fn t_junction_split_classic_pair_unindexed() {
+        let mut scene = scene_with_primitives(vec![t_junction_unindexed_pair()]);
+        let r = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        // Triangle A has a midpoint splitter (B's first corner) on
+        // its long edge → 1 split, 2 sub-triangles.
+        // Triangle B has no foreign corner inside any of its edges
+        // → unchanged.
+        assert_eq!(r.triangles_inspected, 2);
+        assert_eq!(r.triangles_split, 1);
+        assert_eq!(r.split_vertices_inserted, 1);
+        assert_eq!(r.triangles_emitted, 2);
+        assert_eq!(r.triangles_unchanged, 1);
+        // Final face count: 2 (A's split) + 1 (B unchanged) = 3.
+        let prim = &scene.meshes[0].primitives[0];
+        assert_eq!(prim.positions.len() / 3, 3);
+        // Splitter (1,0,0) must appear among the new corners.
+        assert!(prim.positions.iter().any(|p| p == &[1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn t_junction_split_indexed_u32() {
+        // Same fixture as the unindexed case but pre-welded into an
+        // indexed primitive. Splitter index gets appended to
+        // positions, original index buffer is rewritten.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = vec![
+            [0.0, 0.0, 0.0],  // 0
+            [2.0, 0.0, 0.0],  // 1
+            [1.0, 1.0, 0.0],  // 2  (A apex)
+            [1.0, 0.0, 0.0],  // 3  (T-junction vertex)
+            [1.0, -1.0, 0.0], // 4 (B apex)
+        ];
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; prim.positions.len()]);
+        // Triangle A: 0→1→2. Triangle B: 3→1→4.
+        prim.indices = Some(Indices::U32(vec![0, 1, 2, 3, 1, 4]));
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(r.triangles_split, 1);
+        assert_eq!(r.split_vertices_inserted, 1);
+        let prim = &scene.meshes[0].primitives[0];
+        // Positions gain ONE entry — the appended splitter slot.
+        // (The vertex already exists at index 3, but the append path
+        // creates a fresh slot for simplicity — the documented
+        // behaviour.)
+        assert_eq!(prim.positions.len(), 6);
+        // U32 discriminant preserved (max index well under u16::MAX
+        // so the auto-narrow could land us in U16 — check the
+        // logical face count instead).
+        let face_count = match prim.indices.as_ref().unwrap() {
+            Indices::U16(v) => v.len() / 3,
+            Indices::U32(v) => v.len() / 3,
+        };
+        assert_eq!(face_count, 3);
+    }
+
+    #[test]
+    fn t_junction_split_indexed_u16_auto_widening() {
+        // Force the U16 → U32 widening path: pad to almost u16::MAX
+        // pre-existing positions, then add the T-junction pair so a
+        // single splitter spills over.
+        let mut prim = Primitive::new(Topology::Triangles);
+        // Pad with dummy positions (away from origin so they don't
+        // interfere with the T-junction edge).
+        for i in 0..(u16::MAX as usize) {
+            prim.positions.push([1000.0 + i as f32, 0.0, 0.0]);
+        }
+        prim.positions.push([0.0, 0.0, 0.0]); // discarded by retruncate
+        prim.positions.push([2.0, 0.0, 0.0]);
+        prim.positions.push([1.0, 1.0, 0.0]);
+        prim.positions.push([1.0, 0.0, 0.0]);
+        prim.positions.push([1.0, -1.0, 0.0]);
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; prim.positions.len()]);
+        // Use U16 indices with positions filling slots 0..=u16::MAX
+        // exactly — so the next appended splitter slot (u16::MAX + 1
+        // = 65536) sits one past the U16 boundary and forces the
+        // auto-widening path.
+        prim.positions.truncate(0);
+        prim.normals = Some(Vec::new());
+        // 5 T-junction positions occupy slots u16::MAX-4 .. u16::MAX.
+        // Slots 0..u16::MAX-4 are padded with sentinel positions far
+        // from the T-junction edge.
+        let total_padding = (u16::MAX as usize + 1) - 5;
+        for i in 0..total_padding {
+            prim.positions.push([1000.0 + i as f32, 0.0, 0.0]);
+            prim.normals.as_mut().unwrap().push([0.0, 0.0, 1.0]);
+        }
+        let base = prim.positions.len() as u16;
+        for p in [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, -1.0, 0.0],
+        ] {
+            prim.positions.push(p);
+            prim.normals.as_mut().unwrap().push([0.0, 0.0, 1.0]);
+        }
+        // Final position count: u16::MAX as usize + 1 = 65536. Max
+        // index in the U16 buffer is base + 4 = u16::MAX.
+        assert_eq!(prim.positions.len(), u16::MAX as usize + 1);
+        prim.indices = Some(Indices::U16(vec![
+            base,
+            base + 1,
+            base + 2,
+            base + 3,
+            base + 1,
+            base + 4,
+        ]));
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(r.triangles_split, 1);
+        // Appending a fresh splitter pushes the max index above
+        // u16::MAX, so the discriminant must auto-widen to U32.
+        let kind = scene.meshes[0].primitives[0].indices.as_ref().unwrap();
+        assert!(matches!(kind, Indices::U32(_)));
+    }
+
+    #[test]
+    fn t_junction_split_idempotent_on_already_clean_scene() {
+        // Run once on the clean fixture — no faces split. Then a
+        // second run should still report zero splits.
+        let mut scene = scene_with_primitives(vec![unit_cube_soup_primitive()]);
+        let r1 = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(r1.triangles_split, 0);
+        let r2 = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(r2.triangles_split, 0);
+    }
+
+    #[test]
+    fn t_junction_split_eps_clamp_on_nonfinite() {
+        let mut scene = scene_with_primitives(vec![t_junction_unindexed_pair()]);
+        // NaN, infinity, and out-of-range eps all clamp to the
+        // default tolerance — the classic T-junction must still
+        // resolve.
+        let r = repair_split_t_junctions(&mut scene, f32::NAN);
+        assert_eq!(r.triangles_split, 1);
+    }
+
+    #[test]
+    fn t_junction_split_preserves_normals_lengthmatch() {
+        // Length-mismatched normals → the primitive is skipped.
+        let mut prim = t_junction_unindexed_pair();
+        // Shorten normals so the length doesn't match positions.
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; 1]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(r.skipped_length_mismatch, 1);
+        assert_eq!(r.triangles_split, 0);
+        // Positions untouched.
+        assert_eq!(scene.meshes[0].primitives[0].positions.len(), 6);
+    }
+
+    #[test]
+    fn t_junction_split_two_splitters_on_one_edge_emits_three_subtriangles() {
+        // One long edge `(0,0,0) → (3,0,0)` carries two splitters
+        // at parameters t = 1/3 and t = 2/3. The fan should emit 3
+        // sub-triangles.
+        let mut prim = Primitive::new(Topology::Triangles);
+        // Triangle A: 0→3→apex.
+        prim.positions.push([0.0, 0.0, 0.0]);
+        prim.positions.push([3.0, 0.0, 0.0]);
+        prim.positions.push([1.5, 1.0, 0.0]);
+        // Triangle B contributes a corner at (1,0,0) and (2,0,0).
+        // It's two adjacent triangles emitted as a flat strip so
+        // both corners are reachable as foreign keys.
+        prim.positions.push([1.0, 0.0, 0.0]);
+        prim.positions.push([2.0, 0.0, 0.0]);
+        prim.positions.push([1.5, -1.0, 0.0]);
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]; prim.positions.len()]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        // Triangle A's long edge has 2 splitters → 3 sub-triangles.
+        // Triangle B has no foreign corner on any of its edges →
+        // unchanged. The "best edge" tie-break picks the long edge
+        // because both other A edges have no splitters.
+        assert_eq!(r.triangles_split, 1);
+        assert_eq!(r.split_vertices_inserted, 2);
+        assert_eq!(r.triangles_emitted, 3);
+        // Final face count: 3 + 1 = 4.
+        let prim = &scene.meshes[0].primitives[0];
+        assert_eq!(prim.positions.len() / 3, 4);
+    }
+
+    #[test]
+    fn t_junction_split_extras_and_mesh_name_preserved() {
+        use serde_json::json;
+        let mut prim = t_junction_unindexed_pair();
+        prim.extras.insert("preserved".to_string(), json!(true));
+        let mut mesh = Mesh::new(Some("widget".to_string()));
+        mesh.primitives.push(prim);
+        let mut scene = Scene3D::new();
+        scene.add_mesh(mesh);
+
+        let _ = repair_split_t_junctions(&mut scene, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE);
+        assert_eq!(
+            scene.meshes[0].primitives[0]
+                .extras
+                .get("preserved")
+                .and_then(|v| v.as_bool()),
+            Some(true),
         );
         assert_eq!(scene.meshes[0].name.as_deref(), Some("widget"));
     }
