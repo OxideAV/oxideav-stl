@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 216 — `ValidationReport::defect_total()` +
+  `ValidationReport::defects_by_rule()` quantitative summary
+  accessors on `oxideav_stl::validate`. The existing `is_clean()`
+  predicate answers a yes/no question about scene validity; the
+  new pair answer the matching quantitative questions. The 1989
+  spec's facet-orientation / unit-normal / positive-octant /
+  watertight (boundary-edge + non-manifold-edge) rules plus the
+  two sub-checks (T-junction + consistent-winding) populate seven
+  separate counter fields on `ValidationReport`. Tooling that
+  wants to log or sort scenes by overall defect count had to sum
+  the fields by hand; the same tooling for per-rule labeled
+  reporting had to hand-roll seven `if count > 0` arms. Both
+  paths are now one method call. `defect_total() -> usize`
+  returns the arithmetic sum across all seven counters (rules
+  whose `ValidationOptions` toggle is off contribute zero, so the
+  number is bounded by the rule set actually run);
+  `defect_total() == 0` iff `is_clean() == true`, by construction.
+  `defects_by_rule() -> [(&'static str, usize); 7]` returns the
+  per-rule labeled breakdown in `validate` scan order
+  (`"facet_orientation"`, `"non_unit_normal"`, `"positive_octant"`,
+  `"boundary_edges"`, `"non_manifold_edges"`, `"t_junction"`,
+  `"inconsistent_winding"`) — the labels are stable strings safe
+  to use as metric names or log keys, and the seven counts sum
+  exactly to `defect_total()`. Pure-getter, allocation-free
+  (`defect_total` is constant-time; `defects_by_rule` returns a
+  fixed-size stack-resident array — no `Vec`, no `String`, no
+  heap traffic). No `Display` impl on the report; callers compose
+  their own formatting against the labeled rows. 7 new unit tests
+  (empty-scene zero, open-triangle boundary-edge count, mixed
+  orientation+boundary sum, every-rule-disabled vacuous total,
+  scan-order label list + sum-matches-total invariant,
+  clean-scene all-zero rows, positive-octant row picks up
+  opt-in rule) cover idempotency between `is_clean()` and
+  `defect_total() == 0`. Lib-test count rises by 7 (166 → 173);
+  surface is purely additive on `ValidationReport` — no rule
+  toggle, no new tolerance constant, no behavioural change to
+  `validate`.
+
 - Round 210 — `repair_split_t_junctions(&mut scene, eps)` +
   `DEFAULT_T_JUNCTION_SPLIT_TOLERANCE` constant +
   `TJunctionSplitReport` carrier in `oxideav_stl::topology`.

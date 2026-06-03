@@ -271,6 +271,35 @@ covering every `Triangles` vertex (non-finite coordinates skipped);
 the scene's node-graph transforms are not applied — STL produces
 identity-transform single-mesh trees in practice.
 
+`ValidationReport` carries a yes/no `is_clean()` predicate plus two
+quantitative summaries for tooling that wants to log or sort scenes
+by overall defect count:
+
+```rust
+use oxideav_stl::{validate, ValidationOptions};
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+let r = validate(&scene, &ValidationOptions::default());
+
+// One scalar headline — sum of every per-rule defect counter.
+// `defect_total() == 0` iff `is_clean() == true`.
+let total = r.defect_total();
+
+// Labeled per-rule breakdown — seven stable string keys safe to use
+// as metric names. Sums exactly to `defect_total()`.
+for (rule, count) in r.defects_by_rule() {
+    if count > 0 {
+        eprintln!("{rule}: {count}");
+    }
+}
+```
+
+Both accessors are pure getters and allocation-free
+(`defects_by_rule` returns a fixed-size stack array, not a `Vec`).
+Rules whose `ValidationOptions` toggle is off contribute zero to
+the total by construction, so the headline is bounded by the rule
+set actually run.
+
 ### T-junction sub-check
 
 The spec's vertex-to-vertex rule says "a vertex of one triangle

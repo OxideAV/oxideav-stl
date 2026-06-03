@@ -324,6 +324,65 @@ impl ValidationReport {
             && self.t_junction_defects == 0
             && self.inconsistent_winding_edges == 0
     }
+
+    /// Sum of every per-rule defect count in the report — a single
+    /// scalar headline for tooling that wants to log or sort scenes
+    /// by their overall validity rather than inspect each rule's
+    /// counters individually.
+    ///
+    /// The sum is the arithmetic total across all seven defect
+    /// counters (`facet_orientation_defects`, `non_unit_normal_defects`,
+    /// `positive_octant_defects`, `boundary_edges`, `non_manifold_edges`,
+    /// `t_junction_defects`, `inconsistent_winding_edges`). Counters
+    /// for rules whose [`ValidationOptions`] toggle is off are zero by
+    /// construction and contribute nothing to the sum, so the number
+    /// is bounded by the rule set actually run.
+    ///
+    /// Returns `0` iff [`Self::is_clean`] returns `true`; the converse
+    /// also holds — these two predicates encode the same invariant
+    /// at quantitative and boolean granularity.
+    pub fn defect_total(&self) -> usize {
+        self.facet_orientation_defects
+            + self.non_unit_normal_defects
+            + self.positive_octant_defects
+            + self.boundary_edges
+            + self.non_manifold_edges
+            + self.t_junction_defects
+            + self.inconsistent_winding_edges
+    }
+
+    /// Labeled breakdown of every per-rule defect count, in the same
+    /// scan order as the [`validate`] pass. Useful for logging,
+    /// sorting, and CI-style row-per-rule reporting:
+    ///
+    /// ```rust
+    /// use oxideav_stl::{validate, ValidationOptions};
+    /// # let scene = oxideav_mesh3d::Scene3D::new();
+    /// let rep = validate(&scene, &ValidationOptions::default());
+    /// for (rule, count) in rep.defects_by_rule() {
+    ///     if count > 0 {
+    ///         eprintln!("{rule}: {count}");
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// The labels are stable strings safe to use as metric names or
+    /// log keys: `"facet_orientation"`, `"non_unit_normal"`,
+    /// `"positive_octant"`, `"boundary_edges"`,
+    /// `"non_manifold_edges"`, `"t_junction"`,
+    /// `"inconsistent_winding"`. The seven entries' counts sum to
+    /// [`Self::defect_total`].
+    pub fn defects_by_rule(&self) -> [(&'static str, usize); 7] {
+        [
+            ("facet_orientation", self.facet_orientation_defects),
+            ("non_unit_normal", self.non_unit_normal_defects),
+            ("positive_octant", self.positive_octant_defects),
+            ("boundary_edges", self.boundary_edges),
+            ("non_manifold_edges", self.non_manifold_edges),
+            ("t_junction", self.t_junction_defects),
+            ("inconsistent_winding", self.inconsistent_winding_edges),
+        ]
+    }
 }
 
 /// Run the configured rules against `scene` and return a
@@ -1580,5 +1639,129 @@ mod tests {
         let r = validate(&scene, &ValidationOptions::default());
         assert_eq!(r.inconsistent_winding_edges, 0);
         assert!(r.is_clean());
+    }
+
+    /// `defect_total()` on an empty scene is zero, in lockstep with
+    /// `is_clean()` returning true.
+    #[test]
+    fn defect_total_empty_scene_is_zero() {
+        let scene = Scene3D::new();
+        let r = validate(&scene, &ValidationOptions::default());
+        assert_eq!(r.defect_total(), 0);
+        assert!(r.is_clean());
+    }
+
+    /// A defect-free single triangle still reports `boundary_edges`
+    /// (three open edges) and `defect_total()` reflects that as a
+    /// non-zero sum, matching `is_clean()` returning false.
+    #[test]
+    fn defect_total_open_triangle_counts_boundary_edges() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let r = validate(&scene, &ValidationOptions::default());
+        assert_eq!(r.boundary_edges, 3);
+        assert_eq!(r.defect_total(), 3);
+        assert!(!r.is_clean());
+    }
+
+    /// A triangle whose stored normal disagrees with the winding-
+    /// derived normal trips both `facet_orientation_defects` and
+    /// `boundary_edges`; `defect_total()` sums them together.
+    #[test]
+    fn defect_total_sums_orientation_and_boundary() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [0.0, 0.0, -1.0],
+        );
+        let r = validate(&scene, &ValidationOptions::default());
+        assert_eq!(r.facet_orientation_defects, 1);
+        assert_eq!(r.boundary_edges, 3);
+        assert_eq!(r.defect_total(), 4);
+        assert!(!r.is_clean());
+    }
+
+    /// Toggling every rule off zeroes every counter and therefore the
+    /// total — the report is vacuously clean regardless of geometry.
+    #[test]
+    fn defect_total_zero_when_every_rule_disabled() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [0.0, 0.0, -1.0],
+        );
+        let opts = ValidationOptions {
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            check_positive_octant: false,
+            check_watertight: false,
+            check_t_junctions: false,
+            check_consistent_winding: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.defect_total(), 0);
+        assert!(r.is_clean());
+    }
+
+    /// `defects_by_rule()` lists every rule's count in scan order with
+    /// stable labels. The seven counts sum to `defect_total()`.
+    #[test]
+    fn defects_by_rule_labels_and_sum_match() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [0.0, 0.0, -1.0],
+        );
+        let r = validate(&scene, &ValidationOptions::default());
+        let rows = r.defects_by_rule();
+        assert_eq!(rows.len(), 7);
+        let labels: Vec<&'static str> = rows.iter().map(|(label, _)| *label).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "facet_orientation",
+                "non_unit_normal",
+                "positive_octant",
+                "boundary_edges",
+                "non_manifold_edges",
+                "t_junction",
+                "inconsistent_winding",
+            ]
+        );
+        let summed: usize = rows.iter().map(|(_, n)| *n).sum();
+        assert_eq!(summed, r.defect_total());
+    }
+
+    /// On a clean scene every `defects_by_rule()` entry has count
+    /// zero, so the row total agrees with the clean-scene
+    /// `defect_total()` of zero.
+    #[test]
+    fn defects_by_rule_all_zero_on_clean_scene() {
+        let scene = Scene3D::new();
+        let r = validate(&scene, &ValidationOptions::default());
+        let rows = r.defects_by_rule();
+        assert!(rows.iter().all(|(_, n)| *n == 0));
+        assert_eq!(r.defect_total(), 0);
+    }
+
+    /// A positive-octant violation contributes to the appropriate row
+    /// even with the rule toggled on top of the default set; the
+    /// label is the stable `"positive_octant"` key.
+    #[test]
+    fn defects_by_rule_picks_up_positive_octant_rule() {
+        let scene = one_facet(
+            vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let opts = ValidationOptions {
+            check_positive_octant: true,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        let rows = r.defects_by_rule();
+        let positive_row = rows.iter().find(|(l, _)| *l == "positive_octant").unwrap();
+        assert!(positive_row.1 > 0);
+        let summed: usize = rows.iter().map(|(_, n)| *n).sum();
+        assert_eq!(r.defect_total(), summed);
     }
 }
