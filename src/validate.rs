@@ -118,6 +118,71 @@ impl Bbox {
         let e = self.extents();
         e[0] <= 0.0 || e[1] <= 0.0 || e[2] <= 0.0
     }
+
+    /// Volume of the bounding box — the product of its three extents.
+    /// Returns `0.0` when the box is degenerate on any axis (matches
+    /// [`Self::is_degenerate`]). Non-finite extents propagate through
+    /// the `f32` multiplication (the bbox itself is only ever built
+    /// from finite vertex coordinates by [`bbox`], so this returns a
+    /// finite number for any bbox produced by this crate).
+    pub fn volume(&self) -> f32 {
+        let e = self.extents();
+        e[0] * e[1] * e[2]
+    }
+
+    /// Surface area of the bounding box — `2 * (xy + yz + xz)`. Returns
+    /// `0.0` for a fully-degenerate (point) box; partially-degenerate
+    /// boxes report a positive area drawn only from the two
+    /// non-degenerate axes (one face's area, doubled).
+    pub fn surface_area(&self) -> f32 {
+        let e = self.extents();
+        2.0 * (e[0] * e[1] + e[1] * e[2] + e[0] * e[2])
+    }
+
+    /// Length of the box's space diagonal — `sqrt(dx^2 + dy^2 + dz^2)`.
+    /// Useful as a single scalar "scene size" headline.
+    pub fn diagonal_length(&self) -> f32 {
+        let e = self.extents();
+        (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt()
+    }
+
+    /// Index of the axis (`0` = X, `1` = Y, `2` = Z) with the greatest
+    /// extent. Slicer pipelines use this to pick which axis to sweep
+    /// the cutting plane along (sweeping the longest axis maximises the
+    /// per-layer fill ratio for a given layer thickness). Ties resolve
+    /// toward the lower index — `[1, 1, 0.5]` returns `0`, `[0.5, 1, 1]`
+    /// returns `1`. Returns [`None`] for a degenerate (zero-volume) box,
+    /// because no single axis dominates a flat or empty bbox.
+    pub fn longest_axis(&self) -> Option<usize> {
+        if self.is_degenerate() {
+            return None;
+        }
+        let e = self.extents();
+        // Tie-break toward the lower index by using strict `>` against
+        // the running best.
+        let mut best = 0usize;
+        if e[1] > e[best] {
+            best = 1;
+        }
+        if e[2] > e[best] {
+            best = 2;
+        }
+        Some(best)
+    }
+
+    /// Whether `p` lies inside the bounding box (inclusive on every
+    /// face). Non-finite components in `p` propagate through the `<=`
+    /// comparison and return `false` for that component, which mirrors
+    /// the spec-style silent-skip behaviour [`bbox`] uses for
+    /// non-finite vertex coordinates.
+    pub fn contains_point(&self, p: [f32; 3]) -> bool {
+        p[0] >= self.min[0]
+            && p[0] <= self.max[0]
+            && p[1] >= self.min[1]
+            && p[1] <= self.max[1]
+            && p[2] >= self.min[2]
+            && p[2] <= self.max[2]
+    }
 }
 
 /// Axis-aligned bounding box of every vertex in every `Triangles`
@@ -129,26 +194,127 @@ impl Bbox {
 /// `min`/`max`, matching the spec's silent-skip behaviour around
 /// pathological inputs.
 pub fn bbox(scene: &Scene3D) -> Option<Bbox> {
-    let mut any = false;
-    let mut mn = [f32::INFINITY; 3];
-    let mut mx = [f32::NEG_INFINITY; 3];
-    for_each_emitted_vertex(scene, |p| {
+    let mut acc = BboxAccumulator::new();
+    for_each_emitted_vertex(scene, |p| acc.add(p));
+    acc.finish()
+}
+
+/// Axis-aligned bounding box of every vertex of the `mesh_idx`-th mesh's
+/// `Triangles` primitives.
+///
+/// Returns [`None`] when:
+/// - `mesh_idx` is out of range for `scene.meshes`.
+/// - The selected mesh has no `Triangles` vertices (all non-triangle
+///   primitives, or all vertex coordinates non-finite).
+///
+/// Non-finite coordinates are skipped (same convention as [`bbox`]).
+/// Node-graph transforms are NOT applied — STL produces identity-
+/// transform single-mesh trees in practice.
+pub fn bbox_of_mesh(scene: &Scene3D, mesh_idx: usize) -> Option<Bbox> {
+    let mesh = scene.meshes.get(mesh_idx)?;
+    let mut acc = BboxAccumulator::new();
+    for prim in &mesh.primitives {
+        if prim.topology != Topology::Triangles {
+            continue;
+        }
+        accumulate_primitive(prim, &mut acc);
+    }
+    acc.finish()
+}
+
+/// Axis-aligned bounding box of the `prim_idx`-th primitive of the
+/// `mesh_idx`-th mesh, when that primitive is `Triangles`.
+///
+/// Returns [`None`] when:
+/// - Either index is out of range.
+/// - The selected primitive's topology is not `Triangles`.
+/// - The primitive has no finite vertex coordinates.
+///
+/// Non-finite coordinates are skipped (same convention as [`bbox`]).
+pub fn bbox_of_primitive(scene: &Scene3D, mesh_idx: usize, prim_idx: usize) -> Option<Bbox> {
+    let prim = scene.meshes.get(mesh_idx)?.primitives.get(prim_idx)?;
+    if prim.topology != Topology::Triangles {
+        return None;
+    }
+    let mut acc = BboxAccumulator::new();
+    accumulate_primitive(prim, &mut acc);
+    acc.finish()
+}
+
+/// Walker that accumulates min/max per axis. Used by [`bbox`],
+/// [`bbox_of_mesh`], [`bbox_of_primitive`].
+struct BboxAccumulator {
+    any: bool,
+    mn: [f32; 3],
+    mx: [f32; 3],
+}
+
+impl BboxAccumulator {
+    fn new() -> Self {
+        Self {
+            any: false,
+            mn: [f32::INFINITY; 3],
+            mx: [f32::NEG_INFINITY; 3],
+        }
+    }
+
+    fn add(&mut self, p: [f32; 3]) {
         for (axis, &c) in p.iter().enumerate() {
             if c.is_finite() {
-                if c < mn[axis] {
-                    mn[axis] = c;
+                if c < self.mn[axis] {
+                    self.mn[axis] = c;
                 }
-                if c > mx[axis] {
-                    mx[axis] = c;
+                if c > self.mx[axis] {
+                    self.mx[axis] = c;
                 }
-                any = true;
+                self.any = true;
             }
         }
-    });
-    if any && mn.iter().all(|c| c.is_finite()) && mx.iter().all(|c| c.is_finite()) {
-        Some(Bbox { min: mn, max: mx })
-    } else {
-        None
+    }
+
+    fn finish(self) -> Option<Bbox> {
+        if self.any
+            && self.mn.iter().all(|c| c.is_finite())
+            && self.mx.iter().all(|c| c.is_finite())
+        {
+            Some(Bbox {
+                min: self.mn,
+                max: self.mx,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Drive a single `Triangles` primitive through a [`BboxAccumulator`].
+/// Mirrors the index-resolution logic in [`for_each_emitted_vertex`]
+/// without walking the whole scene.
+fn accumulate_primitive(prim: &oxideav_mesh3d::Primitive, acc: &mut BboxAccumulator) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    for face_idx in 0..face_count {
+        let (vi0, vi1, vi2) = match &prim.indices {
+            Some(Indices::U16(v)) => {
+                let b = face_idx * 3;
+                (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+            }
+            Some(Indices::U32(v)) => {
+                let b = face_idx * 3;
+                (v[b] as usize, v[b + 1] as usize, v[b + 2] as usize)
+            }
+            None => {
+                let b = face_idx * 3;
+                (b, b + 1, b + 2)
+            }
+        };
+        for &vi in &[vi0, vi1, vi2] {
+            if let Some(p) = prim.positions.get(vi) {
+                acc.add(*p);
+            }
+        }
     }
 }
 
@@ -1006,6 +1172,165 @@ mod tests {
         // give min = (0, 0, 0) and max = (1, 1, 0).
         assert_eq!(bb.min, [0.0, 0.0, 0.0]);
         assert_eq!(bb.max, [1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn bbox_volume_unit_cube_is_one() {
+        let scene = unit_cube_indexed_scene();
+        let bb = bbox(&scene).unwrap();
+        assert_eq!(bb.volume(), 1.0);
+        // 6 faces of unit area each.
+        assert_eq!(bb.surface_area(), 6.0);
+        // sqrt(1 + 1 + 1) = sqrt(3).
+        let diag = bb.diagonal_length();
+        assert!((diag - 3.0_f32.sqrt()).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn bbox_volume_zero_on_degenerate_bbox() {
+        // A single planar triangle on z=0: x and y extents are non-zero,
+        // z extent is zero — degenerate on one axis.
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 3.0, 0.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let bb = bbox(&scene).unwrap();
+        assert!(bb.is_degenerate());
+        assert_eq!(bb.volume(), 0.0);
+        // Surface area = 2 * (xy + yz + xz) = 2 * (6 + 0 + 0) = 12.
+        assert_eq!(bb.surface_area(), 12.0);
+    }
+
+    #[test]
+    fn bbox_longest_axis_picks_x_then_y_then_z() {
+        // Build a synthetic non-cube bbox by laying out vertices.
+        // Extents (2, 1, 1) → longest is X (0).
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 1.0, 1.0],
+        };
+        assert_eq!(bb.longest_axis(), Some(0));
+
+        // Extents (1, 3, 1) → longest is Y (1).
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 3.0, 1.0],
+        };
+        assert_eq!(bb.longest_axis(), Some(1));
+
+        // Extents (1, 1, 4) → longest is Z (2).
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 4.0],
+        };
+        assert_eq!(bb.longest_axis(), Some(2));
+    }
+
+    #[test]
+    fn bbox_longest_axis_resolves_ties_toward_lower_index() {
+        // Cube — all extents equal → tie resolves to X (0).
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        assert_eq!(bb.longest_axis(), Some(0));
+
+        // Y == Z but both larger than X → first encountered longest = Y.
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 2.0, 2.0],
+        };
+        assert_eq!(bb.longest_axis(), Some(1));
+    }
+
+    #[test]
+    fn bbox_longest_axis_returns_none_on_degenerate() {
+        // Planar triangle bbox is degenerate; no single dominant axis.
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 0.0],
+        };
+        assert!(bb.is_degenerate());
+        assert_eq!(bb.longest_axis(), None);
+    }
+
+    #[test]
+    fn bbox_contains_point_inclusive_on_boundary() {
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        // Strict interior.
+        assert!(bb.contains_point([0.5, 0.5, 0.5]));
+        // Corners (inclusive bounds).
+        assert!(bb.contains_point([0.0, 0.0, 0.0]));
+        assert!(bb.contains_point([1.0, 1.0, 1.0]));
+        // Face midpoint.
+        assert!(bb.contains_point([0.0, 0.5, 0.5]));
+        // Outside on each axis.
+        assert!(!bb.contains_point([-0.1, 0.5, 0.5]));
+        assert!(!bb.contains_point([0.5, 1.1, 0.5]));
+        assert!(!bb.contains_point([0.5, 0.5, 2.0]));
+        // Non-finite components reject.
+        assert!(!bb.contains_point([f32::NAN, 0.5, 0.5]));
+        assert!(!bb.contains_point([f32::INFINITY, 0.5, 0.5]));
+    }
+
+    #[test]
+    fn bbox_of_mesh_isolates_mesh_index() {
+        // Two-mesh scene: the second mesh sits at +10 on every axis.
+        let mut scene = unit_cube_indexed_scene();
+        let mut prim2 = Primitive::new(Topology::Triangles);
+        prim2.positions = vec![[10.0, 10.0, 10.0], [11.0, 10.0, 10.0], [10.0, 11.0, 10.0]];
+        scene.add_mesh(Mesh::new(Some("offset".to_string())).with_primitive(prim2));
+
+        let mesh0 = bbox_of_mesh(&scene, 0).unwrap();
+        assert_eq!(mesh0.min, [0.0, 0.0, 0.0]);
+        assert_eq!(mesh0.max, [1.0, 1.0, 1.0]);
+
+        let mesh1 = bbox_of_mesh(&scene, 1).unwrap();
+        assert_eq!(mesh1.min, [10.0, 10.0, 10.0]);
+        assert_eq!(mesh1.max, [11.0, 11.0, 10.0]);
+
+        // Out-of-range index returns None.
+        assert!(bbox_of_mesh(&scene, 2).is_none());
+
+        // The whole-scene bbox spans both meshes.
+        let whole = bbox(&scene).unwrap();
+        assert_eq!(whole.min, [0.0, 0.0, 0.0]);
+        assert_eq!(whole.max, [11.0, 11.0, 10.0]);
+    }
+
+    #[test]
+    fn bbox_of_primitive_isolates_primitive_index() {
+        let mut scene = unit_cube_indexed_scene();
+        let mut prim2 = Primitive::new(Topology::Triangles);
+        prim2.positions = vec![[5.0, 5.0, 5.0], [6.0, 5.0, 5.0], [5.0, 6.0, 5.0]];
+        scene.meshes[0].primitives.push(prim2);
+
+        let p0 = bbox_of_primitive(&scene, 0, 0).unwrap();
+        assert_eq!(p0.min, [0.0, 0.0, 0.0]);
+        assert_eq!(p0.max, [1.0, 1.0, 1.0]);
+
+        let p1 = bbox_of_primitive(&scene, 0, 1).unwrap();
+        assert_eq!(p1.min, [5.0, 5.0, 5.0]);
+        assert_eq!(p1.max, [6.0, 6.0, 5.0]);
+
+        // Out-of-range indices return None.
+        assert!(bbox_of_primitive(&scene, 1, 0).is_none());
+        assert!(bbox_of_primitive(&scene, 0, 2).is_none());
+    }
+
+    #[test]
+    fn bbox_of_primitive_skips_non_triangles() {
+        // A Lines primitive's vertices should NOT contribute even when
+        // we ask directly for that primitive's bbox — STL's bbox is
+        // defined over Triangles topology only.
+        let mut scene = Scene3D::new();
+        let mut lines = Primitive::new(Topology::Lines);
+        lines.positions = vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(lines));
+        assert!(bbox_of_primitive(&scene, 0, 0).is_none());
     }
 
     #[test]

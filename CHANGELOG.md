@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 219 — `Bbox` geometry accessors + per-mesh / per-primitive
+  bbox variants on `oxideav_stl::validate`. The existing `Bbox`
+  type (`min`/`max` plus `extents`/`centre`/`is_degenerate`)
+  surfaces a scene-wide axis-aligned bounding box but lacks the
+  derived scalars slicer / additive-manufacturing pipelines reach
+  for: total volume estimate, bounding-surface area, space-
+  diagonal length, and which axis dominates (sweeping the longest
+  axis maximises per-layer fill ratio, matching the spec's
+  "Sorting the triangles in ascending z-value order is recommended
+  ... in order to optimize performance of the slice program"
+  guidance). Five new pure-getter methods land on `Bbox`:
+  `volume()` (product of the three extents; `0.0` on a degenerate
+  box, matching `is_degenerate`), `surface_area()`
+  (`2 * (xy + yz + xz)`; partially-degenerate boxes still report a
+  positive area drawn from the two non-degenerate axes),
+  `diagonal_length()` (`sqrt(dx² + dy² + dz²)` — one scalar "scene
+  size" headline), `longest_axis()` (returns `Some(0)` for X,
+  `Some(1)` for Y, `Some(2)` for Z; ties resolve toward the lower
+  index; `None` for a degenerate box because no single axis
+  dominates a flat or empty bbox), and `contains_point(p)` (each
+  axis tested inclusive against `min`/`max`; non-finite
+  components reject, matching the spec-style silent-skip
+  behaviour `bbox` uses for non-finite vertex coordinates). Two
+  new scope-narrowed entry points sit alongside the existing
+  scene-wide `bbox`: `bbox_of_mesh(scene, mesh_idx) -> Option<Bbox>`
+  (only that mesh's `Triangles` primitives contribute) and
+  `bbox_of_primitive(scene, mesh_idx, prim_idx) -> Option<Bbox>`
+  (only that one primitive, returning `None` for non-`Triangles`
+  topology or any out-of-range index). Both share a single
+  `BboxAccumulator` walker with the scene-wide path so the
+  min/max accumulation logic stays unified. The whole suite is
+  allocation-free (`Bbox` is `Copy`, the accessors take `&self`,
+  the per-scope variants borrow `&Scene3D` and return `Option<Bbox>`
+  by value); no `Mesh3DRegistry` plumbing changes; no public-
+  type breakage. 15 new tests cover the geometry math (unit cube
+  volume + surface area + diagonal; 2x3x4 brick survives a
+  binary roundtrip with bit-identical extents), the longest-axis
+  tie-break + degenerate-box short-circuit, `contains_point`
+  inclusive-boundary + non-finite rejection, and the per-mesh /
+  per-primitive isolation against a hand-built multi-mesh and
+  multi-`solid` ASCII flavour. 188 lib tests pass (was 173).
+
 - Round 216 — `ValidationReport::defect_total()` +
   `ValidationReport::defects_by_rule()` quantitative summary
   accessors on `oxideav_stl::validate`. The existing `is_clean()`

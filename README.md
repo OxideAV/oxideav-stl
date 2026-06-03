@@ -269,7 +269,42 @@ when interoperating with strict-spec consumers. All other rules
 default on. `oxideav_stl::bbox(&scene)` returns an `Option<Bbox>`
 covering every `Triangles` vertex (non-finite coordinates skipped);
 the scene's node-graph transforms are not applied — STL produces
-identity-transform single-mesh trees in practice.
+identity-transform single-mesh trees in practice. `Bbox` carries
+five geometry accessors for slicer / additive-manufacturing
+pipelines that downstream the bbox to a pre-print sanity report:
+
+```rust
+use oxideav_stl::{bbox, bbox_of_mesh, bbox_of_primitive};
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+if let Some(bb) = bbox(&scene) {
+    let _vol = bb.volume();             // dx * dy * dz
+    let _sa = bb.surface_area();        // 2*(xy + yz + xz)
+    let _diag = bb.diagonal_length();   // sqrt(dx² + dy² + dz²)
+    let _axis = bb.longest_axis();      // Some(0|1|2), None on degenerate
+    let _inside = bb.contains_point([0.5, 0.5, 0.5]);
+}
+
+// Per-mesh / per-primitive scope-narrowed variants — same
+// non-finite-skip behaviour as the scene-wide `bbox`. Returns
+// `None` for an out-of-range index or a non-`Triangles` primitive.
+let _per_mesh = bbox_of_mesh(&scene, 0);
+let _per_prim = bbox_of_primitive(&scene, 0, 0);
+```
+
+`longest_axis()` returns `Some(0)` for X, `Some(1)` for Y,
+`Some(2)` for Z — slicers sweep along the longest axis to
+maximise per-layer fill ratio, matching the spec's "Sorting the
+triangles in ascending z-value order is recommended … in order to
+optimize performance of the slice program" guidance. Ties resolve
+toward the lower index (`[1, 1, 0.5]` → `Some(0)`); degenerate
+boxes return `None` because no single axis dominates a flat or
+empty bbox. `contains_point` is inclusive on every face;
+non-finite components reject, matching the silent-skip behaviour
+the underlying `bbox` walker uses for non-finite vertex
+coordinates. All five accessors are pure getters
+(`Bbox` is `Copy`); the scope-narrowed variants are allocation-
+free borrows that return `Option<Bbox>` by value.
 
 `ValidationReport` carries a yes/no `is_clean()` predicate plus two
 quantitative summaries for tooling that wants to log or sort scenes
