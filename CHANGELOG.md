@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 225 — `Bbox::point` / `Bbox::merge` / `Bbox::expanded_by`
+  composition helpers on `oxideav_stl::validate`. The round-219
+  geometry accessors (`volume` / `surface_area` / `diagonal_length`
+  / `longest_axis` / `contains_point`) cover one-bbox queries; the
+  three new methods cover the two-bbox + transform cases tooling
+  reaches for when assembling a scene-wide envelope out of per-mesh
+  / per-source pieces (multi-source slicer pre-flight where each
+  input reports its own bbox; clearance-aware build-plate checks
+  that need a kerf / raft margin around the print volume). The
+  three helpers: `Bbox::point(p)` returns a degenerate single-point
+  bbox seed (`min == max == p`); `Bbox::merge(&other)` returns the
+  component-wise union (the smallest box containing every point in
+  either input — commutative, associative, self-merge identity);
+  `Bbox::expanded_by(margin)` returns a box grown by `margin` on
+  every face (each axis: `min - margin`, `max + margin`).
+  Symmetric expansion preserves the centre; a `0.0` margin is the
+  identity; negative margins shrink and may produce a degenerate
+  or inverted result on any axis whose magnitude is exceeded — the
+  caller is responsible for re-checking `is_degenerate` afterwards
+  (documented contract). Pure getters, allocation-free (`Bbox`
+  stays `Copy`; the helpers take/return `Bbox` by value). The
+  composition pattern `Bbox::point(first).merge(&Bbox::point(next))
+  .merge(...)` produces the same hull as the brute-force
+  `bbox(&scene)` walker for any finite vertex stream; the merge of
+  per-mesh `bbox_of_mesh` reports equals the scene-wide `bbox` —
+  pinned as integration tests. 7 new unit tests (point-seed
+  degeneracy + zero-everything accessors; merge commutativity +
+  associativity + self-identity; point-merge accumulation matches
+  a vertex swarm; expanded-by margin sum on every axis +
+  centre-preservation + identity on zero; negative margin shrinks
+  but stays non-degenerate; negative excess inverts the box) and
+  3 new integration tests (per-mesh merge equals scene-wide bbox
+  on a multi-mesh scene; expanded envelope contains every emitted
+  vertex of a binary-roundtrip-decoded scene; point-merge
+  accumulator matches the brute-force walker on the brick
+  fixture). Lib-test count rises by 7 (182 → 189);
+  integration-test count rises by 3 (6 → 9 in `bbox_geometry.rs`).
+  No new public type; no behavioural change to `bbox` /
+  `bbox_of_mesh` / `bbox_of_primitive` / any other existing
+  accessor. Standalone (`--no-default-features --lib`) build
+  unchanged.
+
 - Round 219 — `Bbox` geometry accessors + per-mesh / per-primitive
   bbox variants on `oxideav_stl::validate`. The existing `Bbox`
   type (`min`/`max` plus `extents`/`centre`/`is_degenerate`)

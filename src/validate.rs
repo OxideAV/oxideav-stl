@@ -183,6 +183,68 @@ impl Bbox {
             && p[2] >= self.min[2]
             && p[2] <= self.max[2]
     }
+
+    /// Degenerate "single point" bbox — `min == max == p`. Useful as
+    /// the seed for code that incrementally merges further bboxes via
+    /// [`Self::merge`] without juggling an [`Option<Bbox>`]. The
+    /// resulting box reports zero extents on every axis and is
+    /// [`Self::is_degenerate`] by construction. Non-finite `p`
+    /// components are stored as-is; subsequent merges with finite
+    /// boxes propagate the non-finite values through the per-axis
+    /// `min`/`max` (`NaN`-aware ordering is not applied here — feed
+    /// only finite seeds when bit-exact correctness across an
+    /// accumulation chain matters).
+    pub fn point(p: [f32; 3]) -> Self {
+        Self { min: p, max: p }
+    }
+
+    /// Component-wise union of two bounding boxes — the smallest
+    /// axis-aligned box that contains every point in either input.
+    /// `merge` is commutative and associative, so an accumulation
+    /// chain like `a.merge(b).merge(c)` produces the same box as
+    /// `c.merge(a).merge(b)`. Useful for pipeline tooling that needs
+    /// to compose a scene-wide bbox from per-mesh / per-primitive
+    /// scopes (e.g. multi-source slicer pre-flight where each input
+    /// reports its own bbox) without re-walking the geometry.
+    pub fn merge(&self, other: &Bbox) -> Bbox {
+        Bbox {
+            min: [
+                self.min[0].min(other.min[0]),
+                self.min[1].min(other.min[1]),
+                self.min[2].min(other.min[2]),
+            ],
+            max: [
+                self.max[0].max(other.max[0]),
+                self.max[1].max(other.max[1]),
+                self.max[2].max(other.max[2]),
+            ],
+        }
+    }
+
+    /// Box grown by `margin` on every face — `min - margin`, `max +
+    /// margin` per axis. Useful as a slicer pre-flight safety margin
+    /// (extruder / laser kerf, raft clearance, build-plate edge
+    /// tolerance). Negative `margin` shrinks the box and may produce
+    /// a degenerate or inverted result when the magnitude exceeds
+    /// half an extent on any axis — the caller is responsible for
+    /// re-checking [`Self::is_degenerate`] afterwards if that
+    /// matters. Non-finite `margin` propagates through the
+    /// component-wise addition; finite inputs are guaranteed to
+    /// produce finite outputs.
+    pub fn expanded_by(&self, margin: f32) -> Bbox {
+        Bbox {
+            min: [
+                self.min[0] - margin,
+                self.min[1] - margin,
+                self.min[2] - margin,
+            ],
+            max: [
+                self.max[0] + margin,
+                self.max[1] + margin,
+                self.max[2] + margin,
+            ],
+        }
+    }
 }
 
 /// Axis-aligned bounding box of every vertex in every `Triangles`
@@ -1274,6 +1336,135 @@ mod tests {
         // Non-finite components reject.
         assert!(!bb.contains_point([f32::NAN, 0.5, 0.5]));
         assert!(!bb.contains_point([f32::INFINITY, 0.5, 0.5]));
+    }
+
+    #[test]
+    fn bbox_point_seed_is_degenerate() {
+        let bb = Bbox::point([1.0, 2.0, 3.0]);
+        assert_eq!(bb.min, [1.0, 2.0, 3.0]);
+        assert_eq!(bb.max, [1.0, 2.0, 3.0]);
+        assert_eq!(bb.extents(), [0.0, 0.0, 0.0]);
+        assert_eq!(bb.centre(), [1.0, 2.0, 3.0]);
+        assert!(bb.is_degenerate());
+        assert_eq!(bb.volume(), 0.0);
+        assert_eq!(bb.surface_area(), 0.0);
+        assert_eq!(bb.diagonal_length(), 0.0);
+        assert!(bb.longest_axis().is_none());
+        // The seed itself is contained (inclusive bounds).
+        assert!(bb.contains_point([1.0, 2.0, 3.0]));
+        // A different point is not.
+        assert!(!bb.contains_point([1.0, 2.0, 3.1]));
+    }
+
+    #[test]
+    fn bbox_merge_is_commutative_and_unions_corners() {
+        let a = Bbox {
+            min: [-1.0, 0.0, 2.0],
+            max: [1.0, 3.0, 5.0],
+        };
+        let b = Bbox {
+            min: [0.0, -2.0, 4.0],
+            max: [4.0, 1.0, 6.0],
+        };
+        let ab = a.merge(&b);
+        let ba = b.merge(&a);
+        assert_eq!(ab, ba);
+        assert_eq!(ab.min, [-1.0, -2.0, 2.0]);
+        assert_eq!(ab.max, [4.0, 3.0, 6.0]);
+
+        // Merging with self is the identity.
+        assert_eq!(a.merge(&a), a);
+
+        // Associativity: (a U b) U c == a U (b U c).
+        let c = Bbox {
+            min: [-5.0, 5.0, -5.0],
+            max: [-3.0, 7.0, 0.0],
+        };
+        let left = a.merge(&b).merge(&c);
+        let right = a.merge(&b.merge(&c));
+        assert_eq!(left, right);
+        assert_eq!(left.min, [-5.0, -2.0, -5.0]);
+        assert_eq!(left.max, [4.0, 7.0, 6.0]);
+    }
+
+    #[test]
+    fn bbox_merge_seeded_from_point_accumulates_a_swarm() {
+        // Worked use-case: build a scene-wide bbox out of per-primitive
+        // bboxes without juggling Option<Bbox> in the caller.
+        let points: [[f32; 3]; 4] = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.5, 0.5],
+            [-0.5, 2.0, 0.5],
+            [0.5, 0.5, 3.0],
+        ];
+        let mut acc = Bbox::point(points[0]);
+        for p in &points[1..] {
+            acc = acc.merge(&Bbox::point(*p));
+        }
+        assert_eq!(acc.min, [-0.5, 0.0, 0.0]);
+        assert_eq!(acc.max, [1.0, 2.0, 3.0]);
+        // Each seed point is inside the final hull.
+        for p in &points {
+            assert!(acc.contains_point(*p));
+        }
+    }
+
+    #[test]
+    fn bbox_expanded_by_grows_each_face_by_margin() {
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 4.0, 6.0],
+        };
+        let e = bb.expanded_by(0.5);
+        assert_eq!(e.min, [-0.5, -0.5, -0.5]);
+        assert_eq!(e.max, [2.5, 4.5, 6.5]);
+        // Extents grow by `2 * margin` on every axis.
+        assert_eq!(e.extents(), [3.0, 5.0, 7.0]);
+        // Centre is preserved by a symmetric expansion.
+        assert_eq!(e.centre(), bb.centre());
+        // The original bbox sits strictly inside the expanded one.
+        assert!(e.contains_point(bb.min));
+        assert!(e.contains_point(bb.max));
+    }
+
+    #[test]
+    fn bbox_expanded_by_zero_is_identity() {
+        let bb = Bbox {
+            min: [-1.0, -2.0, -3.0],
+            max: [4.0, 5.0, 6.0],
+        };
+        assert_eq!(bb.expanded_by(0.0), bb);
+    }
+
+    #[test]
+    fn bbox_expanded_by_negative_margin_shrinks_box() {
+        // -0.5 shrinks each face by 0.5; extents drop by 1.0 per axis.
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [4.0, 6.0, 8.0],
+        };
+        let s = bb.expanded_by(-0.5);
+        assert_eq!(s.min, [0.5, 0.5, 0.5]);
+        assert_eq!(s.max, [3.5, 5.5, 7.5]);
+        assert_eq!(s.extents(), [3.0, 5.0, 7.0]);
+        assert!(!s.is_degenerate());
+    }
+
+    #[test]
+    fn bbox_expanded_by_negative_excess_inverts_box() {
+        // Shrinking by more than half-extent on any axis produces an
+        // inverted (degenerate) box on that axis. Caller must check
+        // `is_degenerate` afterwards — documented contract.
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        let s = bb.expanded_by(-0.6);
+        // min crossed max on every axis.
+        for axis in 0..3 {
+            assert!(s.min[axis] > s.max[axis]);
+        }
+        assert!(s.is_degenerate());
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! Integration tests for the round-219 `Bbox` geometry accessors
 //! (`volume`, `surface_area`, `diagonal_length`, `longest_axis`,
 //! `contains_point`) and the per-mesh / per-primitive `bbox_of_mesh`
-//! / `bbox_of_primitive` variants.
+//! / `bbox_of_primitive` variants. Round 225 extends these with
+//! `Bbox::point` / `merge` / `expanded_by` composition tests.
 
 use oxideav_mesh3d::{Mesh, Mesh3DDecoder, Mesh3DEncoder, Primitive, Scene3D, Topology};
-use oxideav_stl::{bbox, bbox_of_mesh, bbox_of_primitive, StlDecoder, StlEncoder};
+use oxideav_stl::{bbox, bbox_of_mesh, bbox_of_primitive, Bbox, StlDecoder, StlEncoder};
 
 /// Build a 2x3x4 ASCII STL "brick" — vertices at (0..2, 0..3, 0..4)
 /// via two triangles on one bottom face. The bbox of the encoded
@@ -185,4 +186,89 @@ fn longest_axis_picks_the_longer_dimension_after_translation() {
     let bb = bbox(&scene).unwrap();
     assert_eq!(bb.extents(), [1.0, 5.0, 0.5]);
     assert_eq!(bb.longest_axis(), Some(1));
+}
+
+#[test]
+fn merge_of_per_mesh_bboxes_equals_scene_wide_bbox() {
+    // Build a multi-mesh scene: brick at the origin + a second mesh
+    // offset to (+10, +10, +10). `bbox(&scene)` should match
+    // `bbox_of_mesh(0).merge(bbox_of_mesh(1))`.
+    let mut scene = brick_2_3_4_scene();
+    let mut prim2 = Primitive::new(Topology::Triangles);
+    prim2.positions = vec![
+        [10.0, 10.0, 10.0],
+        [12.0, 10.0, 10.0],
+        [10.0, 13.0, 10.0],
+        [10.0, 10.0, 14.0],
+    ];
+    prim2.indices = Some(oxideav_mesh3d::Indices::U32(vec![
+        0, 1, 2, 0, 2, 3, 0, 3, 1,
+    ]));
+    scene.add_mesh(Mesh::new(Some("offset".to_string())).with_primitive(prim2));
+
+    let whole = bbox(&scene).expect("non-empty scene");
+    let m0 = bbox_of_mesh(&scene, 0).expect("mesh 0 bbox");
+    let m1 = bbox_of_mesh(&scene, 1).expect("mesh 1 bbox");
+    assert_eq!(m0.merge(&m1), whole);
+    // And ordering is irrelevant.
+    assert_eq!(m1.merge(&m0), whole);
+
+    // Seed-from-point + merge reaches the same hull.
+    let seed = Bbox::point([0.0, 0.0, 0.0]);
+    let chained = seed.merge(&m0).merge(&m1);
+    assert_eq!(chained, whole);
+}
+
+#[test]
+fn expanded_bbox_contains_every_vertex_in_the_decoded_scene() {
+    // Decode the brick through the binary path, then check that an
+    // `expanded_by(margin)` envelope (a slicer pre-flight build-plate
+    // safety margin) contains every emitted vertex of the round-
+    // tripped scene with room to spare.
+    let scene = brick_2_3_4_scene();
+    let bytes = StlEncoder::new_binary()
+        .encode(&scene)
+        .expect("brick encodes");
+    let decoded = StlDecoder::new().decode(&bytes).expect("brick decodes");
+
+    let bb = bbox(&decoded).expect("decoded brick has a bbox");
+    let envelope = bb.expanded_by(0.5);
+
+    // Every emitted vertex sits inside the expanded envelope.
+    for mesh in &decoded.meshes {
+        for prim in &mesh.primitives {
+            for p in &prim.positions {
+                assert!(envelope.contains_point(*p), "vertex {p:?} not in envelope");
+            }
+        }
+    }
+
+    // The envelope strictly contains the original bbox's corners.
+    assert!(envelope.contains_point(bb.min));
+    assert!(envelope.contains_point(bb.max));
+    // And the envelope's centre matches the original centre (symmetric expand).
+    assert_eq!(envelope.centre(), bb.centre());
+}
+
+#[test]
+fn point_merge_accumulator_matches_brute_force_bbox() {
+    // Composition pattern: seed the accumulator with the first vertex,
+    // then `merge` each subsequent `Bbox::point` and compare against
+    // the brute-force `bbox(&scene)` walker.
+    let scene = brick_2_3_4_scene();
+    let mut iter = scene
+        .meshes
+        .iter()
+        .flat_map(|m| m.primitives.iter())
+        .filter(|p| p.topology == Topology::Triangles)
+        .flat_map(|p| p.positions.iter().copied());
+
+    let first = iter.next().expect("brick has at least one vertex");
+    let mut acc = Bbox::point(first);
+    for v in iter {
+        acc = acc.merge(&Bbox::point(v));
+    }
+
+    let walker = bbox(&scene).expect("brick has a bbox");
+    assert_eq!(acc, walker);
 }

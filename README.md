@@ -306,6 +306,39 @@ coordinates. All five accessors are pure getters
 (`Bbox` is `Copy`); the scope-narrowed variants are allocation-
 free borrows that return `Option<Bbox>` by value.
 
+Three composition helpers round out the bbox API for tooling that
+builds a scene-wide bbox out of per-source pieces without juggling
+an `Option<Bbox>` in the caller:
+
+```rust
+use oxideav_stl::Bbox;
+
+// Degenerate single-point seed. Useful starting accumulator for an
+// incremental `merge` chain.
+let seed = Bbox::point([0.0, 0.0, 0.0]);
+
+// Component-wise union — the smallest bbox containing every point in
+// either input. Commutative + associative, so accumulation order
+// doesn't matter.
+let a = Bbox { min: [-1.0, 0.0, 0.0], max: [1.0, 2.0, 1.0] };
+let b = Bbox { min: [ 0.0, 1.0, 2.0], max: [3.0, 3.0, 5.0] };
+let union = a.merge(&b);
+assert_eq!(union.min, [-1.0, 0.0, 0.0]);
+assert_eq!(union.max, [ 3.0, 3.0, 5.0]);
+
+// Slicer pre-flight safety margin — grow each face by `margin`. A
+// negative margin shrinks (caller must re-check `is_degenerate` if
+// the magnitude exceeds half an extent on any axis).
+let envelope = union.expanded_by(0.5);
+assert_eq!(envelope.centre(), union.centre());
+```
+
+`merge` is symmetric (`a.merge(&b) == b.merge(&a)`) and idempotent
+on a self-merge (`a.merge(&a) == a`); `expanded_by(0.0)` is the
+identity. The pattern `Bbox::point(first).merge(&Bbox::point(next))
+.merge(&Bbox::point(...))` produces the same hull as the
+brute-force walker for any finite vertex stream.
+
 `ValidationReport` carries a yes/no `is_clean()` predicate plus two
 quantitative summaries for tooling that wants to log or sort scenes
 by overall defect count:
