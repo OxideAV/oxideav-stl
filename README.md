@@ -339,6 +339,38 @@ identity. The pattern `Bbox::point(first).merge(&Bbox::point(next))
 .merge(&Bbox::point(...))` produces the same hull as the
 brute-force walker for any finite vertex stream.
 
+Three more methods round out the AABB lattice for slicer-pre-flight
+collision / containment queries:
+
+```rust
+use oxideav_stl::Bbox;
+
+let part = Bbox { min: [0.0, 0.0, 0.0], max: [50.0, 30.0, 20.0] };
+let build_plate = Bbox { min: [0.0, 0.0, 0.0], max: [250.0, 210.0, 200.0] };
+
+// "Does the part bbox fit inside the build-plate envelope?"
+assert!(build_plate.contains_bbox(&part));
+
+// "Does this part overlap with another already placed?"
+let other = Bbox { min: [40.0, 0.0, 0.0], max: [90.0, 30.0, 20.0] };
+assert!(part.intersects(&other));
+
+// "Compute the overlap region of two clearance envelopes."
+let overlap = part.intersect(&other).expect("non-empty overlap");
+assert_eq!(overlap.min, [40.0, 0.0, 0.0]);
+assert_eq!(overlap.max, [50.0, 30.0, 20.0]);
+```
+
+`intersects` is symmetric and self-true on any non-inverted box;
+`intersect` is the component-wise dual of `merge` (returns `None`
+when separated on any axis, a degenerate box when touching on
+exactly one face); `contains_bbox` is reflexive, transitive, and
+inclusive on touching faces. Together with `merge` these form the
+AABB lattice (union via `merge`, intersection via `intersect`, the
+`⊇` order via `contains_bbox`) so any two scene-derived bboxes
+compose under the standard set-theoretic operations without
+re-walking the geometry.
+
 `ValidationReport` carries a yes/no `is_clean()` predicate plus two
 quantitative summaries for tooling that wants to log or sort scenes
 by overall defect count:

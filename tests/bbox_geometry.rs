@@ -272,3 +272,78 @@ fn point_merge_accumulator_matches_brute_force_bbox() {
     let walker = bbox(&scene).expect("brick has a bbox");
     assert_eq!(acc, walker);
 }
+
+#[test]
+fn build_plate_contains_brick_under_round_trip() {
+    // Slicer-pre-flight worked example: a 250 x 210 x 200 mm build-plate
+    // bbox must fully contain the decoded part's bbox after a binary
+    // roundtrip. The 2x3x4 brick fits with room to spare.
+    let scene = brick_2_3_4_scene();
+    let bytes = StlEncoder::new_binary()
+        .encode(&scene)
+        .expect("encode brick");
+    let decoded = StlDecoder::new()
+        .decode(&bytes)
+        .expect("decode brick roundtrip");
+    let part_bbox = bbox(&decoded).expect("brick has a bbox");
+    let build_plate = Bbox {
+        min: [0.0, 0.0, 0.0],
+        max: [250.0, 210.0, 200.0],
+    };
+    assert!(build_plate.contains_bbox(&part_bbox));
+    // The reverse — the part does NOT contain the build-plate.
+    assert!(!part_bbox.contains_bbox(&build_plate));
+}
+
+#[test]
+fn per_mesh_bboxes_intersect_iff_meshes_overlap_in_space() {
+    // Build a two-mesh scene: brick at origin + a translated copy. The
+    // translated copy's per-mesh bbox intersects the origin brick when
+    // the translation is short enough; not when it's beyond the brick's
+    // X extent.
+    let mut scene = brick_2_3_4_scene();
+    let mut prim2 = Primitive::new(Topology::Triangles);
+    // Shifted by 1.0 on X — overlaps the origin brick (which spans X 0..2).
+    prim2.positions = vec![
+        [1.0, 0.0, 0.0],
+        [3.0, 0.0, 0.0],
+        [3.0, 3.0, 0.0],
+        [1.0, 3.0, 0.0],
+    ];
+    prim2.indices = Some(oxideav_mesh3d::Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+    scene.add_mesh(Mesh::new(Some("near".to_string())).with_primitive(prim2));
+
+    let near_bb = bbox_of_mesh(&scene, 1).expect("near mesh has a bbox");
+    let origin_bb = bbox_of_mesh(&scene, 0).expect("origin mesh has a bbox");
+    assert!(near_bb.intersects(&origin_bb));
+    let overlap = origin_bb.intersect(&near_bb).expect("overlap on X 1..2");
+    assert_eq!(overlap.min[0], 1.0);
+    assert_eq!(overlap.max[0], 2.0);
+
+    // Now add a far mesh that sits past the brick's X extent.
+    let mut far = Primitive::new(Topology::Triangles);
+    far.positions = vec![[10.0, 0.0, 0.0], [12.0, 0.0, 0.0], [11.0, 1.0, 0.0]];
+    scene.add_mesh(Mesh::new(Some("far".to_string())).with_primitive(far));
+    let far_bb = bbox_of_mesh(&scene, 2).expect("far mesh has a bbox");
+    assert!(!far_bb.intersects(&origin_bb));
+    assert!(origin_bb.intersect(&far_bb).is_none());
+}
+
+#[test]
+fn intersect_of_per_mesh_bbox_with_scene_bbox_is_per_mesh_bbox() {
+    // Per-mesh bbox is by construction contained in the scene-wide
+    // bbox, so the intersection collapses to the per-mesh bbox.
+    let mut scene = brick_2_3_4_scene();
+    let mut prim2 = Primitive::new(Topology::Triangles);
+    prim2.positions = vec![[10.0, 10.0, 10.0], [11.0, 10.0, 10.0], [10.0, 11.0, 10.0]];
+    scene.add_mesh(Mesh::new(Some("second".to_string())).with_primitive(prim2));
+
+    let scene_bb = bbox(&scene).expect("scene bbox");
+    let mesh0_bb = bbox_of_mesh(&scene, 0).expect("mesh 0 bbox");
+    let mesh1_bb = bbox_of_mesh(&scene, 1).expect("mesh 1 bbox");
+
+    assert!(scene_bb.contains_bbox(&mesh0_bb));
+    assert!(scene_bb.contains_bbox(&mesh1_bb));
+    assert_eq!(scene_bb.intersect(&mesh0_bb), Some(mesh0_bb));
+    assert_eq!(scene_bb.intersect(&mesh1_bb), Some(mesh1_bb));
+}

@@ -245,6 +245,70 @@ impl Bbox {
             ],
         }
     }
+
+    /// Whether two bounding boxes overlap on every axis (inclusive on
+    /// every face — boxes that touch on exactly one face share that
+    /// face and count as intersecting). Symmetric
+    /// (`a.intersects(&b) == b.intersects(&a)`); self-intersection is
+    /// always true for any non-inverted box. The dual of [`Self::merge`]
+    /// — `merge` returns the smallest box containing both inputs;
+    /// `intersects` reports whether the largest box contained in both
+    /// inputs is non-empty (see [`Self::intersect`] for the box itself).
+    /// Useful for slicer pre-flight collision queries when several
+    /// parts share a build-plate.
+    pub fn intersects(&self, other: &Bbox) -> bool {
+        self.min[0] <= other.max[0]
+            && self.max[0] >= other.min[0]
+            && self.min[1] <= other.max[1]
+            && self.max[1] >= other.min[1]
+            && self.min[2] <= other.max[2]
+            && self.max[2] >= other.min[2]
+    }
+
+    /// The overlap region of two bounding boxes — the largest box
+    /// contained in both inputs. Returns [`None`] when the inputs do
+    /// not overlap (`!self.intersects(other)`); otherwise the returned
+    /// box has `min == max(self.min, other.min)` and `max ==
+    /// min(self.max, other.max)` component-wise. The result may be
+    /// degenerate on any axis whose `self.min == other.max` (or the
+    /// dual) — touching on exactly one face produces a flat (zero-
+    /// extent) intersection. Symmetric and idempotent
+    /// (`a.intersect(&a) == Some(a)` for any non-inverted box).
+    /// Component-wise dual of [`Self::merge`].
+    pub fn intersect(&self, other: &Bbox) -> Option<Bbox> {
+        if !self.intersects(other) {
+            return None;
+        }
+        Some(Bbox {
+            min: [
+                self.min[0].max(other.min[0]),
+                self.min[1].max(other.min[1]),
+                self.min[2].max(other.min[2]),
+            ],
+            max: [
+                self.max[0].min(other.max[0]),
+                self.max[1].min(other.max[1]),
+                self.max[2].min(other.max[2]),
+            ],
+        })
+    }
+
+    /// Whether `other` lies entirely inside `self` (inclusive on every
+    /// face). Reflexive (`a.contains_bbox(&a) == true` for any
+    /// non-inverted box) and transitive (`a ⊇ b && b ⊇ c → a ⊇ c`).
+    /// A degenerate `other` (zero extents on some axis) is still
+    /// "contained" as long as its single-point face lies within
+    /// `self`'s closed range. Useful for slicer pre-flight checks
+    /// like "does this part bbox fit inside the build-plate
+    /// envelope" — call `build_plate.contains_bbox(&part)`.
+    pub fn contains_bbox(&self, other: &Bbox) -> bool {
+        self.min[0] <= other.min[0]
+            && self.min[1] <= other.min[1]
+            && self.min[2] <= other.min[2]
+            && self.max[0] >= other.max[0]
+            && self.max[1] >= other.max[1]
+            && self.max[2] >= other.max[2]
+    }
 }
 
 /// Axis-aligned bounding box of every vertex in every `Triangles`
@@ -1465,6 +1529,250 @@ mod tests {
             assert!(s.min[axis] > s.max[axis]);
         }
         assert!(s.is_degenerate());
+    }
+
+    #[test]
+    fn bbox_intersects_is_symmetric_and_self_true() {
+        let a = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        let b = Bbox {
+            min: [1.0, 1.0, 1.0],
+            max: [3.0, 3.0, 3.0],
+        };
+        // Overlap on every axis.
+        assert!(a.intersects(&b));
+        assert!(b.intersects(&a));
+        // Self-intersection.
+        assert!(a.intersects(&a));
+    }
+
+    #[test]
+    fn bbox_intersects_returns_false_when_separated_on_any_axis() {
+        let a = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        // Separated on X (gap (1.0, 2.0)).
+        let sep_x = Bbox {
+            min: [2.0, 0.0, 0.0],
+            max: [3.0, 1.0, 1.0],
+        };
+        assert!(!a.intersects(&sep_x));
+        // Separated on Y.
+        let sep_y = Bbox {
+            min: [0.0, 2.0, 0.0],
+            max: [1.0, 3.0, 1.0],
+        };
+        assert!(!a.intersects(&sep_y));
+        // Separated on Z.
+        let sep_z = Bbox {
+            min: [0.0, 0.0, 2.0],
+            max: [1.0, 1.0, 3.0],
+        };
+        assert!(!a.intersects(&sep_z));
+    }
+
+    #[test]
+    fn bbox_intersects_inclusive_on_touching_face() {
+        // Two boxes sharing exactly one face (touching at x = 1)
+        // count as intersecting under the inclusive rule.
+        let a = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        let touch = Bbox {
+            min: [1.0, 0.0, 0.0],
+            max: [2.0, 1.0, 1.0],
+        };
+        assert!(a.intersects(&touch));
+        assert!(touch.intersects(&a));
+    }
+
+    #[test]
+    fn bbox_intersect_returns_overlap_region() {
+        let a = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        let b = Bbox {
+            min: [1.0, 1.0, 1.0],
+            max: [3.0, 3.0, 3.0],
+        };
+        let ab = a.intersect(&b).expect("overlap is non-empty");
+        let ba = b.intersect(&a).expect("overlap is non-empty");
+        // Symmetric.
+        assert_eq!(ab, ba);
+        // Component-wise dual of merge: min = max-of-mins, max = min-of-maxes.
+        assert_eq!(ab.min, [1.0, 1.0, 1.0]);
+        assert_eq!(ab.max, [2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn bbox_intersect_returns_none_when_separated() {
+        let a = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        let far = Bbox {
+            min: [5.0, 5.0, 5.0],
+            max: [6.0, 6.0, 6.0],
+        };
+        assert!(a.intersect(&far).is_none());
+        assert!(far.intersect(&a).is_none());
+    }
+
+    #[test]
+    fn bbox_intersect_is_idempotent_on_self() {
+        let a = Bbox {
+            min: [-1.0, 0.0, 2.0],
+            max: [3.0, 5.0, 7.0],
+        };
+        assert_eq!(a.intersect(&a), Some(a));
+    }
+
+    #[test]
+    fn bbox_intersect_touching_face_is_degenerate() {
+        // Boxes touching on exactly one face produce a flat (zero-extent
+        // on the touching axis) intersection — documented contract.
+        let a = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        let touch = Bbox {
+            min: [1.0, 0.0, 0.0],
+            max: [2.0, 1.0, 1.0],
+        };
+        let overlap = a.intersect(&touch).expect("touching boxes overlap");
+        assert_eq!(overlap.min, [1.0, 0.0, 0.0]);
+        assert_eq!(overlap.max, [1.0, 1.0, 1.0]);
+        // Zero extent on X — degenerate by construction.
+        assert!(overlap.is_degenerate());
+        assert_eq!(overlap.volume(), 0.0);
+    }
+
+    #[test]
+    fn bbox_intersect_contained_returns_inner_box() {
+        // Inner box sits entirely inside outer; intersection is the inner.
+        let outer = Bbox {
+            min: [-1.0, -1.0, -1.0],
+            max: [3.0, 3.0, 3.0],
+        };
+        let inner = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        assert_eq!(outer.intersect(&inner), Some(inner));
+        assert_eq!(inner.intersect(&outer), Some(inner));
+    }
+
+    #[test]
+    fn bbox_contains_bbox_reflexive_and_inclusive() {
+        let a = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        // Reflexive — every box contains itself.
+        assert!(a.contains_bbox(&a));
+        // Inclusive — corner-touching inner box still counts as contained.
+        let inner_corner = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        assert!(a.contains_bbox(&inner_corner));
+        let inner_other = Bbox {
+            min: [1.0, 1.0, 1.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        assert!(a.contains_bbox(&inner_other));
+    }
+
+    #[test]
+    fn bbox_contains_bbox_rejects_overhanging_or_separated() {
+        let a = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        // Overhangs on X.
+        let oh = Bbox {
+            min: [-0.5, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        assert!(!a.contains_bbox(&oh));
+        // Fully outside.
+        let far = Bbox {
+            min: [5.0, 5.0, 5.0],
+            max: [6.0, 6.0, 6.0],
+        };
+        assert!(!a.contains_bbox(&far));
+        // Partial overlap — not contained.
+        let partial = Bbox {
+            min: [1.0, 1.0, 1.0],
+            max: [3.0, 3.0, 3.0],
+        };
+        assert!(!a.contains_bbox(&partial));
+        // Asymmetric — partial does not contain a either.
+        assert!(!partial.contains_bbox(&a));
+    }
+
+    #[test]
+    fn bbox_contains_bbox_transitive() {
+        // a ⊇ b ⊇ c → a ⊇ c.
+        let a = Bbox {
+            min: [-1.0, -1.0, -1.0],
+            max: [4.0, 4.0, 4.0],
+        };
+        let b = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [3.0, 3.0, 3.0],
+        };
+        let c = Bbox {
+            min: [1.0, 1.0, 1.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        assert!(a.contains_bbox(&b));
+        assert!(b.contains_bbox(&c));
+        assert!(a.contains_bbox(&c));
+    }
+
+    #[test]
+    fn bbox_contains_bbox_accepts_degenerate_inner_on_face() {
+        // Degenerate inner box (point) sitting on outer's face is contained.
+        let outer = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        };
+        let inner_point = Bbox::point([0.5, 0.5, 0.5]);
+        assert!(outer.contains_bbox(&inner_point));
+        let inner_corner_point = Bbox::point([0.0, 0.0, 0.0]);
+        assert!(outer.contains_bbox(&inner_corner_point));
+        // Point just outside on one axis is not contained.
+        let outside_point = Bbox::point([1.5, 0.5, 0.5]);
+        assert!(!outer.contains_bbox(&outside_point));
+    }
+
+    #[test]
+    fn bbox_intersect_merge_lattice_invariants() {
+        // Bounding-box lattice sanity: for any two boxes A, B,
+        //   A.merge(B) ⊇ A and ⊇ B  (union dominates both inputs)
+        //   A.intersect(B), when present, is contained by both A and B
+        let a = Bbox {
+            min: [-1.0, 0.0, 1.0],
+            max: [2.0, 3.0, 4.0],
+        };
+        let b = Bbox {
+            min: [0.0, 1.0, 2.0],
+            max: [3.0, 4.0, 5.0],
+        };
+        let union = a.merge(&b);
+        assert!(union.contains_bbox(&a));
+        assert!(union.contains_bbox(&b));
+        let overlap = a.intersect(&b).expect("overlap is non-empty");
+        assert!(a.contains_bbox(&overlap));
+        assert!(b.contains_bbox(&overlap));
+        // Self-consistency: union contains overlap as well.
+        assert!(union.contains_bbox(&overlap));
     }
 
     #[test]

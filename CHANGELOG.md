@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 231 — `Bbox::intersects` / `Bbox::intersect` /
+  `Bbox::contains_bbox` AABB-lattice methods on
+  `oxideav_stl::validate`. The round-225 composition helpers
+  (`point`/`merge`/`expanded_by`) covered the union half of the
+  lattice; the three new methods cover the intersection +
+  containment half so any two scene-derived bboxes compose under
+  the standard set-theoretic operations without re-walking the
+  geometry. Slicer-pre-flight use cases pick up three queries:
+  "does this part fit inside the build-plate envelope" →
+  `build_plate.contains_bbox(&part)`; "does this part overlap with
+  another already placed" → `a.intersects(&b)`; "compute the
+  overlap region of two clearance envelopes" → `a.intersect(&b)`.
+  `intersects(other)` returns `bool` — inclusive on every face
+  (boxes touching on exactly one face share that face and count as
+  intersecting), symmetric, and self-true on any non-inverted box.
+  `intersect(other) -> Option<Bbox>` returns the largest box
+  contained in both inputs; `None` when the inputs do not overlap
+  (`!self.intersects(other)`); otherwise `min ==
+  max(self.min, other.min)` and `max == min(self.max, other.max)`
+  component-wise. The result may be degenerate on any axis whose
+  `self.min == other.max` (or the dual) — touching on exactly one
+  face produces a flat (zero-extent) intersection. Symmetric and
+  idempotent (`a.intersect(&a) == Some(a)` for any non-inverted
+  box); component-wise dual of `merge`.
+  `contains_bbox(other) -> bool` returns whether `other` lies
+  entirely inside `self` (inclusive on every face). Reflexive
+  (`a.contains_bbox(&a) == true`) and transitive
+  (`a ⊇ b && b ⊇ c → a ⊇ c`); a degenerate `other` (zero extents
+  on some axis) is still "contained" as long as its single-point
+  face lies within `self`'s closed range. Pure getters,
+  allocation-free (`Bbox` stays `Copy`; the methods take `&Bbox`
+  borrows and return `bool` / `Option<Bbox>` by value). Lattice
+  invariants pinned as a unit test: for any `a`, `b`,
+  `a.merge(&b)` contains both inputs; `a.intersect(&b)`, when
+  present, is contained by both inputs. 13 new unit tests
+  (intersects symmetry + self-true; axis-by-axis separation
+  rejection; inclusive-on-touching-face; intersect overlap region
+  + symmetry + dual-of-merge invariants; separated returns None;
+  self-idempotence; touching-face produces a flat degenerate box;
+  fully-contained returns the inner box; contains_bbox reflexive
+  + inclusive; rejects overhanging / separated / partial overlap;
+  transitive a ⊇ b ⊇ c; accepts degenerate inner point on a face
+  but rejects outside-point; lattice cross-check tying merge,
+  intersect, contains_bbox together) and 3 new integration tests
+  (build-plate envelope contains decoded brick under binary
+  roundtrip; per-mesh bboxes report intersect/non-intersect when
+  meshes overlap or are separated in space; intersect of per-mesh
+  bbox with scene-wide bbox collapses to the per-mesh bbox).
+  Lib-test count rises by 13 (189 → 202); integration-test count
+  rises by 3 (9 → 12 in `bbox_geometry.rs`). No new public type;
+  no behavioural change to `bbox` / `bbox_of_mesh` /
+  `bbox_of_primitive` / any other existing accessor. Standalone
+  (`--no-default-features --lib`) build unchanged.
+
 - Round 225 — `Bbox::point` / `Bbox::merge` / `Bbox::expanded_by`
   composition helpers on `oxideav_stl::validate`. The round-219
   geometry accessors (`volume` / `surface_area` / `diagonal_length`
