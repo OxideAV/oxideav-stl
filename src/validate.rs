@@ -309,6 +309,51 @@ impl Bbox {
             && self.max[1] >= other.max[1]
             && self.max[2] >= other.max[2]
     }
+
+    /// The eight corner vertices of the bounding box, in a fixed
+    /// canonical order derived from the three-bit Cartesian product of
+    /// `(min, max)` on each axis with X as the lowest-order bit:
+    ///
+    /// | Index | Bit pattern (zyx) | Corner                               |
+    /// | ----- | ----------------- | ------------------------------------ |
+    /// | 0     | `000`             | `(min.x, min.y, min.z)`              |
+    /// | 1     | `001`             | `(max.x, min.y, min.z)`              |
+    /// | 2     | `010`             | `(min.x, max.y, min.z)`              |
+    /// | 3     | `011`             | `(max.x, max.y, min.z)`              |
+    /// | 4     | `100`             | `(min.x, min.y, max.z)`              |
+    /// | 5     | `101`             | `(max.x, min.y, max.z)`              |
+    /// | 6     | `110`             | `(min.x, max.y, max.z)`              |
+    /// | 7     | `111`             | `(max.x, max.y, max.z)`              |
+    ///
+    /// The lowest-z face is corners `[0, 1, 2, 3]` (a slicer's first
+    /// layer for a part on the build plate); the highest-z face is
+    /// `[4, 5, 6, 7]`; opposite corners are at indices `i` and `7 - i`.
+    /// Corner `0` is always [`Self::min`] and corner `7` is always
+    /// [`Self::max`].
+    ///
+    /// Useful for pipelines that need to test the bbox against a
+    /// non-axis-aligned transform (e.g. asking "would this part still
+    /// fit on the build plate after a 30° Z-rotation?"), for visualising
+    /// the bbox as a wireframe, or for computing a rotated bbox by
+    /// transforming each corner and re-bounding the transformed set.
+    /// A degenerate bbox (one or more zero extents) collapses pairs of
+    /// corners onto each other but the eight-slot layout is preserved.
+    /// All eight corners satisfy [`Self::contains_point`] on `self`
+    /// (inclusive on every face).
+    pub fn corners(&self) -> [[f32; 3]; 8] {
+        let mn = self.min;
+        let mx = self.max;
+        [
+            [mn[0], mn[1], mn[2]],
+            [mx[0], mn[1], mn[2]],
+            [mn[0], mx[1], mn[2]],
+            [mx[0], mx[1], mn[2]],
+            [mn[0], mn[1], mx[2]],
+            [mx[0], mn[1], mx[2]],
+            [mn[0], mx[1], mx[2]],
+            [mx[0], mx[1], mx[2]],
+        ]
+    }
 }
 
 /// Axis-aligned bounding box of every vertex in every `Triangles`

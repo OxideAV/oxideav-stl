@@ -347,3 +347,94 @@ fn intersect_of_per_mesh_bbox_with_scene_bbox_is_per_mesh_bbox() {
     assert_eq!(scene_bb.intersect(&mesh0_bb), Some(mesh0_bb));
     assert_eq!(scene_bb.intersect(&mesh1_bb), Some(mesh1_bb));
 }
+
+#[test]
+fn corners_have_documented_canonical_order() {
+    // Pick a bbox with three distinct axis ranges so each of the 8
+    // corners is a unique point — that pins the canonical order.
+    let bb = Bbox {
+        min: [1.0, 2.0, 3.0],
+        max: [4.0, 5.0, 6.0],
+    };
+    let c = bb.corners();
+    // X is the lowest-order bit (b0), Y is b1, Z is b2.
+    assert_eq!(c[0], [1.0, 2.0, 3.0]); // 000
+    assert_eq!(c[1], [4.0, 2.0, 3.0]); // 001 — X high
+    assert_eq!(c[2], [1.0, 5.0, 3.0]); // 010 — Y high
+    assert_eq!(c[3], [4.0, 5.0, 3.0]); // 011 — XY high
+    assert_eq!(c[4], [1.0, 2.0, 6.0]); // 100 — Z high
+    assert_eq!(c[5], [4.0, 2.0, 6.0]); // 101 — XZ high
+    assert_eq!(c[6], [1.0, 5.0, 6.0]); // 110 — YZ high
+    assert_eq!(c[7], [4.0, 5.0, 6.0]); // 111 — XYZ high
+                                       // The doc-comment's "opposite corners at i and 7-i" invariant.
+    for i in 0..8 {
+        let lhs = c[i];
+        let rhs = c[7 - i];
+        // Sum of opposite corners equals min + max on every axis.
+        for axis in 0..3 {
+            assert_eq!(lhs[axis] + rhs[axis], bb.min[axis] + bb.max[axis]);
+        }
+    }
+    // Lowest-z and highest-z face groupings.
+    for i in 0..4 {
+        assert_eq!(c[i][2], bb.min[2]);
+        assert_eq!(c[4 + i][2], bb.max[2]);
+    }
+    // Corner 0 is min, corner 7 is max.
+    assert_eq!(c[0], bb.min);
+    assert_eq!(c[7], bb.max);
+}
+
+#[test]
+fn every_corner_satisfies_contains_point_on_the_brick() {
+    // Decode through the binary path so the bbox is exercised end-to-
+    // end, then assert every one of the eight corners is inclusively
+    // inside the bbox by `contains_point`. The non-corner midpoint is
+    // a sanity-check sibling — also inside.
+    let scene = brick_2_3_4_scene();
+    let bytes = StlEncoder::new_binary().encode(&scene).unwrap();
+    let decoded = StlDecoder::new().decode(&bytes).unwrap();
+    let bb = bbox(&decoded).expect("decoded brick has a bbox");
+    for c in bb.corners() {
+        assert!(
+            bb.contains_point(c),
+            "corner {:?} should lie inside the bbox {:?}",
+            c,
+            bb
+        );
+    }
+    // Centre is also inside, by construction.
+    assert!(bb.contains_point(bb.centre()));
+    // First corner is the min, last is the max — bit-exact equality.
+    assert_eq!(bb.corners()[0], bb.min);
+    assert_eq!(bb.corners()[7], bb.max);
+}
+
+#[test]
+fn degenerate_bbox_collapses_corner_pairs_but_keeps_eight_slots() {
+    // Flat-on-z bbox — both z faces map to the same value, so corners
+    // 0..3 are bit-identical to corners 4..7 component-wise. The eight-
+    // slot layout is preserved (no compaction), and every corner still
+    // lies inclusively inside the (degenerate) bbox.
+    let bb = Bbox {
+        min: [0.0, 0.0, 5.0],
+        max: [2.0, 3.0, 5.0],
+    };
+    assert!(bb.is_degenerate());
+    let c = bb.corners();
+    assert_eq!(c.len(), 8);
+    for i in 0..4 {
+        // Same (x, y); same z because both faces are at z = 5.
+        assert_eq!(c[i], c[i + 4]);
+    }
+    // All eight corners still contained.
+    for corner in c {
+        assert!(bb.contains_point(corner));
+    }
+    // Single-point bbox — every corner is the same point.
+    let pt = Bbox::point([7.0, 7.0, 7.0]);
+    let pc = pt.corners();
+    for corner in pc {
+        assert_eq!(corner, [7.0, 7.0, 7.0]);
+    }
+}

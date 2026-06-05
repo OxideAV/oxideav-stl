@@ -371,6 +371,34 @@ AABB lattice (union via `merge`, intersection via `intersect`, the
 compose under the standard set-theoretic operations without
 re-walking the geometry.
 
+`Bbox::corners()` returns the eight corner vertices as `[[f32; 3]; 8]`
+in a fixed canonical order — the three-bit Cartesian product of
+`(min, max)` on each axis with X as the lowest-order bit, so
+corner `0` is always `min`, corner `7` is always `max`, opposite
+corners sit at indices `i` and `7 - i`, and the lowest-z face is
+the first four slots:
+
+```rust
+use oxideav_stl::Bbox;
+
+let bb = Bbox { min: [0.0, 0.0, 0.0], max: [10.0, 10.0, 10.0] };
+let c = bb.corners();
+assert_eq!(c[0], bb.min);
+assert_eq!(c[7], bb.max);
+// Every corner is inclusively inside the bbox.
+for corner in c {
+    assert!(bb.contains_point(corner));
+}
+```
+
+Useful for pipelines that need to test the bbox against a
+non-axis-aligned transform (e.g. "does the part still fit on the
+build plate after a 30° Z-rotation?"), for visualising the bbox as
+a wireframe, or for computing an oriented bbox by transforming
+each corner and re-bounding the transformed set. A degenerate
+bbox (one or more zero extents) collapses pairs of corners onto
+each other but the eight-slot layout is preserved.
+
 `ValidationReport` carries a yes/no `is_clean()` predicate plus two
 quantitative summaries for tooling that wants to log or sort scenes
 by overall defect count:

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 239 — `Bbox::corners()` returns the eight corner vertices of
+  the bounding box as `[[f32; 3]; 8]` in a fixed canonical order
+  derived from the three-bit Cartesian product of `(min, max)` on each
+  axis with X as the lowest-order bit. Corner `0` is always `Bbox::min`
+  and corner `7` is always `Bbox::max`; opposite corners sit at indices
+  `i` and `7 - i`; the lowest-z face is `[0, 1, 2, 3]` and the highest-z
+  face is `[4, 5, 6, 7]`. Useful for pipelines that need to test the
+  bbox against a non-axis-aligned transform (rotated build-plate fit),
+  for visualising the bbox as a wireframe, or for computing an oriented
+  bbox by transforming each corner and re-bounding the transformed set.
+  Every returned corner satisfies `Bbox::contains_point` on the
+  originating bbox (inclusive on every face); a degenerate bbox collapses
+  pairs of corners onto each other but preserves the eight-slot layout.
+
 - Round 236 — `oxideav_stl::inspect_binary_header(bytes)` typed
   byte-stream-level inspector that returns a
   `BinaryHeaderReport { triangle_count, expected_byte_length,
