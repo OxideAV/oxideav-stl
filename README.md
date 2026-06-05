@@ -798,6 +798,61 @@ vertex-to-vertex → `repair_weld_vertices` +
 positive-octant → `repair_translate_to_positive_octant`,
 consistent-winding → `repair_make_winding_consistent`.
 
+## Binary-header inspector (pre-decode triage)
+
+`oxideav_stl::inspect_binary_header(bytes)` is a typed,
+allocation-free pass over a binary STL byte slice that returns a
+`BinaryHeaderReport` *without* building a `Scene3D`. Useful for
+pre-decode triage of files whose vendor extensions you may want to
+reject (or specifically expect) before paying for the full decode
+pass:
+
+```rust
+use oxideav_stl::inspect_binary_header;
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let bytes = std::fs::read("part.stl")?;
+let rep = inspect_binary_header(&bytes)?;
+
+if !rep.spec_compliant_attributes {
+    eprintln!(
+        "non-zero attribute slots on {}/{} triangles — vendor extension in play",
+        rep.non_zero_attribute_count,
+        rep.triangles_walked,
+    );
+}
+if !rep.length_matches_exactly {
+    eprintln!(
+        "file length {} ≠ expected {:?}",
+        rep.actual_byte_length,
+        rep.expected_byte_length,
+    );
+}
+# Ok(())
+# }
+```
+
+The 1989 spec says the per-triangle `uint16` attribute slot "should
+be set to zero"; vendors (Materialise / VisCAM / SolidView)
+repurpose it for per-face colour packing. The inspector surfaces
+the raw header-level facts only — `triangle_count`,
+`expected_byte_length` vs `actual_byte_length`,
+`non_zero_attribute_count` + matching `_fraction`,
+`spec_compliant_attributes`, `triangles_walked` — and never
+classifies which convention. (For convention classification see
+`oxideav_stl::detect_color_convention`.)
+
+Truncated streams (slice shorter than the declared
+`triangle_count * 50 + 84`) are NOT an error here; the inspector
+walks as many records as the slice physically contains, sets
+`length_matches_exactly = false`, and surfaces the walked count
+under `triangles_walked` so a caller can decide whether to recover
+the partial information or reject. Slices shorter than the 84-byte
+header-plus-count prefix do return `Error::InvalidData`. The full
+decode path (`StlDecoder::decode` / `binary::decode`) keeps
+rejecting truncated bodies as before — the inspector is the
+lightweight triage tool, not a replacement for the decoder.
+
 ## ASCII comment-line tolerance
 
 Whole-line `;`-introduced and `#`-introduced comments are silently

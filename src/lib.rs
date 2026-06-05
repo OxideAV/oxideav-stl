@@ -42,6 +42,7 @@ pub mod binary;
 pub mod color;
 pub mod decoder;
 pub mod encoder;
+pub mod inspect;
 pub(crate) mod materialise_header;
 pub mod topology;
 #[cfg(feature = "trace")]
@@ -54,6 +55,7 @@ pub use decoder::StlDecoder;
 pub use encoder::{
     EncodeStats, StlEncoder, AUTO_INJECT_SHARE_FACTOR_THRESHOLD, UNIQUE_VERTEX_COUNT_EXTRAS_KEY,
 };
+pub use inspect::{inspect_binary_header, BinaryHeaderReport};
 pub use topology::{
     repair_drop_degenerate_triangles, repair_make_winding_consistent,
     repair_normalize_unit_normals, repair_orient_normals_from_winding,

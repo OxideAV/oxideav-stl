@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 236 — `oxideav_stl::inspect_binary_header(bytes)` typed
+  byte-stream-level inspector that returns a
+  `BinaryHeaderReport { triangle_count, expected_byte_length,
+  actual_byte_length, length_matches_exactly,
+  non_zero_attribute_count, non_zero_attribute_fraction,
+  spec_compliant_attributes, triangles_walked }` *without* building
+  a `Scene3D`. Pre-decode triage hook: the 1989 spec says the
+  per-triangle `uint16` attribute slot "should be set to zero", and
+  the inspector surfaces the raw header-level facts so consumers can
+  decide pre-decode whether to expect vendor-extension payloads (or
+  reject strict-spec inputs that carry them). Allocation-free single
+  forward pass — never copies the triangle records and never
+  allocates intermediate `Vec`s. Truncated streams (slice shorter
+  than `84 + N * 50` for the declared `N`) are not an error here;
+  the inspector walks every record the slice physically contains,
+  sets `length_matches_exactly = false`, and surfaces the walked
+  count under `triangles_walked`. Slices shorter than the 84-byte
+  header-plus-count prefix return `Error::InvalidData` since no
+  valid binary STL is shorter. Distinct from
+  `oxideav_stl::detect_color_convention` (which classifies a *bit
+  distribution* across vendor conventions) and from `validate`
+  (which operates on a decoded `Scene3D`); this inspector reports
+  the raw header-level facts only. `BinaryHeaderReport` is `Copy`
+  so the caller can stash it in a log/scoreboard without lifetime
+  juggling.
+
 - Round 231 — `Bbox::intersects` / `Bbox::intersect` /
   `Bbox::contains_bbox` AABB-lattice methods on
   `oxideav_stl::validate`. The round-225 composition helpers
