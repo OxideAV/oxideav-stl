@@ -467,6 +467,26 @@ it in *opposite* directions. Same-direction edges land in
 the watertight rule. Uses bit-exact `f32` position equality, so weld
 floating-point-noise corners via `repair_weld_vertices` first.
 
+### Degenerate-triangle rule
+
+A triangle whose three corner *positions* are not pairwise distinct
+under bit-exact `f32` equality has no well-defined outward normal
+direction — the right-hand-rule clause of §6.5 ("vertices listed in
+counterclockwise order when looking at the object from the outside")
+cannot be applied. `ValidationOptions::check_degenerate_triangles`
+(on by default) surfaces every such face on
+`degenerate_triangle_defects` plus a capped illustrative list on
+`degenerate_triangle_examples`. The check is `O(N)` (three bit-equality
+probes per face) and piggybacks on the main validate loop. Equality
+model is identical to `repair_drop_degenerate_triangles`, so the
+diagnostic count equals the number of triangles that repair would
+drop on the same scene — useful as a pre-flight gauge of how much
+geometry would survive the repair pass before running it. Distinct
+from `check_unit_normal` (which inspects the *stored* normal vector,
+not the geometry), and disjoint from the watertight rule (degenerate
+triangles still contribute their three edges to the edge-use map and
+can fool watertightness on their own).
+
 ## Topology utilities
 
 Opt-in, non-mutating analysis of the triangle soup lives in

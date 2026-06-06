@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 242 — `ValidationOptions::check_degenerate_triangles` (on by
+  default) + matching `ValidationReport::degenerate_triangle_defects`
+  count and `degenerate_triangle_examples` capped illustrative list.
+  Detects triangles whose three corner *positions* are not pairwise
+  distinct under bit-exact `f32` equality — a face whose corners
+  collide has no defined outward normal direction and therefore cannot
+  satisfy §6.5's right-hand-rule clause. The diagnostic counterpart to
+  `repair_drop_degenerate_triangles`: same bit-equality model, non-
+  mutating; the count produced by `validate` equals the number of
+  triangles the repair pass would drop on the same scene. The check is
+  `O(N)` (single forward pass, three bit-equality probes per face) and
+  piggybacks on the main `validate` loop. Brings the validation rule
+  set from seven to eight; `is_clean()`, `defect_total()`, and
+  `defects_by_rule()` pick up the new field, the latter now returning
+  an eight-entry array with the new `"degenerate_triangle"` label
+  pinned at the tail. Distinct from `check_unit_normal` (which inspects
+  the *stored* normal, not the geometry), and disjoint from the
+  watertight rule (degenerate triangles still contribute their three
+  edges to the undirected edge-use map).
+
 - Round 239 — `Bbox::corners()` returns the eight corner vertices of
   the bounding box as `[[f32; 3]; 8]` in a fixed canonical order
   derived from the three-bit Cartesian product of `(min, max)` on each

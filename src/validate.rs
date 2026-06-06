@@ -556,6 +556,18 @@ pub struct ValidationOptions {
     /// Uses bit-exact `f32` position equality like the watertight
     /// check.
     pub check_consistent_winding: bool,
+    /// Whether to apply the degenerate-triangle check — a triangle
+    /// whose three corner *positions* are not pairwise distinct (any
+    /// two corners coincide by bit-exact `f32` match) has no well-
+    /// defined outward normal direction and therefore cannot satisfy
+    /// the spec's right-hand-rule clause. The diagnostic counterpart
+    /// to [`crate::repair_drop_degenerate_triangles`] — same equality
+    /// model, non-mutating. Default `true`. The check is `O(N)`
+    /// (single forward pass, three bit-equality probes per face) and
+    /// piggybacks on the main validate loop. Distinct from
+    /// [`Self::check_unit_normal`] (which inspects the *stored*
+    /// normal, not the geometry).
+    pub check_degenerate_triangles: bool,
 }
 
 impl Default for ValidationOptions {
@@ -570,6 +582,7 @@ impl Default for ValidationOptions {
             check_t_junctions: false,
             t_junction_tolerance: DEFAULT_T_JUNCTION_TOLERANCE,
             check_consistent_winding: true,
+            check_degenerate_triangles: true,
         }
     }
 }
@@ -647,6 +660,19 @@ pub struct ValidationReport {
     /// offending edge contributes the locators of both adjacent
     /// triangles (capped overall at [`MAX_REPORTED_DEFECTS`]).
     pub inconsistent_winding_examples: Vec<FaceLocator>,
+    /// Total count of triangles whose three corner *positions* are
+    /// not pairwise distinct under bit-exact `f32` equality — at
+    /// least one of `(v0, v1)`, `(v1, v2)`, `(v0, v2)` collides.
+    /// A degenerate triangle has no well-defined outward normal so
+    /// the spec's right-hand-rule clause cannot be satisfied. Zero
+    /// when [`ValidationOptions::check_degenerate_triangles`] is off.
+    /// Mirrors the dropping criterion used by
+    /// [`crate::repair_drop_degenerate_triangles`].
+    pub degenerate_triangle_defects: usize,
+    /// Up to [`MAX_REPORTED_DEFECTS`] illustrative facet locations
+    /// from `degenerate_triangle_defects`. Reported in scan order
+    /// across `meshes → primitives → faces`.
+    pub degenerate_triangle_examples: Vec<FaceLocator>,
 }
 
 impl ValidationReport {
@@ -660,6 +686,7 @@ impl ValidationReport {
             && self.non_manifold_edges == 0
             && self.t_junction_defects == 0
             && self.inconsistent_winding_edges == 0
+            && self.degenerate_triangle_defects == 0
     }
 
     /// Sum of every per-rule defect count in the report — a single
@@ -667,13 +694,14 @@ impl ValidationReport {
     /// by their overall validity rather than inspect each rule's
     /// counters individually.
     ///
-    /// The sum is the arithmetic total across all seven defect
+    /// The sum is the arithmetic total across all eight defect
     /// counters (`facet_orientation_defects`, `non_unit_normal_defects`,
     /// `positive_octant_defects`, `boundary_edges`, `non_manifold_edges`,
-    /// `t_junction_defects`, `inconsistent_winding_edges`). Counters
-    /// for rules whose [`ValidationOptions`] toggle is off are zero by
-    /// construction and contribute nothing to the sum, so the number
-    /// is bounded by the rule set actually run.
+    /// `t_junction_defects`, `inconsistent_winding_edges`,
+    /// `degenerate_triangle_defects`). Counters for rules whose
+    /// [`ValidationOptions`] toggle is off are zero by construction
+    /// and contribute nothing to the sum, so the number is bounded
+    /// by the rule set actually run.
     ///
     /// Returns `0` iff [`Self::is_clean`] returns `true`; the converse
     /// also holds — these two predicates encode the same invariant
@@ -686,6 +714,7 @@ impl ValidationReport {
             + self.non_manifold_edges
             + self.t_junction_defects
             + self.inconsistent_winding_edges
+            + self.degenerate_triangle_defects
     }
 
     /// Labeled breakdown of every per-rule defect count, in the same
@@ -707,9 +736,9 @@ impl ValidationReport {
     /// log keys: `"facet_orientation"`, `"non_unit_normal"`,
     /// `"positive_octant"`, `"boundary_edges"`,
     /// `"non_manifold_edges"`, `"t_junction"`,
-    /// `"inconsistent_winding"`. The seven entries' counts sum to
-    /// [`Self::defect_total`].
-    pub fn defects_by_rule(&self) -> [(&'static str, usize); 7] {
+    /// `"inconsistent_winding"`, `"degenerate_triangle"`. The eight
+    /// entries' counts sum to [`Self::defect_total`].
+    pub fn defects_by_rule(&self) -> [(&'static str, usize); 8] {
         [
             ("facet_orientation", self.facet_orientation_defects),
             ("non_unit_normal", self.non_unit_normal_defects),
@@ -718,6 +747,7 @@ impl ValidationReport {
             ("non_manifold_edges", self.non_manifold_edges),
             ("t_junction", self.t_junction_defects),
             ("inconsistent_winding", self.inconsistent_winding_edges),
+            ("degenerate_triangle", self.degenerate_triangle_defects),
         ]
     }
 }
@@ -792,6 +822,24 @@ pub fn validate(scene: &Scene3D, opts: &ValidationOptions) -> ValidationReport {
                     if !in_octant {
                         rep.positive_octant_defects += 1;
                         push_capped(&mut rep.positive_octant_examples, loc);
+                    }
+                }
+
+                // Degenerate-triangle rule. Mirrors the equality
+                // model used by `repair_drop_degenerate_triangles`
+                // (bit-exact `f32` corner-pair match) so the
+                // diagnostic count is the same number the repair pass
+                // would drop. Three corner pairs to check; any one
+                // collision makes the face degenerate.
+                if opts.check_degenerate_triangles {
+                    let eq = |a: [f32; 3], b: [f32; 3]| -> bool {
+                        a[0].to_bits() == b[0].to_bits()
+                            && a[1].to_bits() == b[1].to_bits()
+                            && a[2].to_bits() == b[2].to_bits()
+                    };
+                    if eq(v0, v1) || eq(v1, v2) || eq(v0, v2) {
+                        rep.degenerate_triangle_defects += 1;
+                        push_capped(&mut rep.degenerate_triangle_examples, loc);
                     }
                 }
 
@@ -2574,7 +2622,7 @@ mod tests {
     }
 
     /// `defects_by_rule()` lists every rule's count in scan order with
-    /// stable labels. The seven counts sum to `defect_total()`.
+    /// stable labels. The eight counts sum to `defect_total()`.
     #[test]
     fn defects_by_rule_labels_and_sum_match() {
         let scene = one_facet(
@@ -2583,7 +2631,7 @@ mod tests {
         );
         let r = validate(&scene, &ValidationOptions::default());
         let rows = r.defects_by_rule();
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 8);
         let labels: Vec<&'static str> = rows.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
@@ -2595,6 +2643,7 @@ mod tests {
                 "non_manifold_edges",
                 "t_junction",
                 "inconsistent_winding",
+                "degenerate_triangle",
             ]
         );
         let summed: usize = rows.iter().map(|(_, n)| *n).sum();

@@ -335,3 +335,176 @@ fn validation_report_default_is_zero_and_unclean_for_watertight() {
     assert!(r.is_clean());
     assert!(!r.watertight);
 }
+
+#[test]
+fn round_trip_unit_cube_has_no_degenerate_triangles() {
+    // Every triangle on the closed cube has three pairwise-distinct
+    // corner positions, so the degenerate-triangle rule reports zero.
+    let bytes = unit_cube_binary_bytes();
+    let scene = StlDecoder::new().decode(&bytes).unwrap();
+    let r = validate(&scene, &ValidationOptions::default());
+    assert_eq!(r.degenerate_triangle_defects, 0, "report: {r:?}");
+    assert!(r.degenerate_triangle_examples.is_empty());
+}
+
+#[test]
+fn ascii_three_coincident_corners_flagged_as_degenerate() {
+    // A single facet whose three vertex lines all encode the same
+    // bit-exact position. The right-hand-rule has no outward normal
+    // direction to refer to here; the diagnostic catches it before
+    // any downstream consumer trips over the zero-cross product.
+    let s = "solid degen\n\
+        facet normal 0 0 1\n\
+        outer loop\n\
+        vertex 1 2 3\n\
+        vertex 1 2 3\n\
+        vertex 1 2 3\n\
+        endloop\n\
+        endfacet\n\
+        endsolid degen\n";
+    let scene = StlDecoder::new().decode(s.as_bytes()).unwrap();
+    let r = validate(&scene, &ValidationOptions::default());
+    assert_eq!(r.triangles_total, 1);
+    assert_eq!(r.degenerate_triangle_defects, 1, "report: {r:?}");
+    assert_eq!(r.degenerate_triangle_examples.len(), 1);
+    assert_eq!(r.degenerate_triangle_examples[0].face, 0);
+    assert!(!r.is_clean());
+
+    // The check is in the `is_clean` predicate and in `defect_total`.
+    assert!(r.defect_total() >= 1);
+}
+
+#[test]
+fn ascii_two_coincident_corners_also_flagged() {
+    // Two corners coincide, third is distinct — still degenerate
+    // (collinear-strip pathology). Mirrors the bit-equality rule
+    // used by `repair_drop_degenerate_triangles`.
+    let s = "solid degen\n\
+        facet normal 0 0 1\n\
+        outer loop\n\
+        vertex 0 0 0\n\
+        vertex 0 0 0\n\
+        vertex 1 0 0\n\
+        endloop\n\
+        endfacet\n\
+        endsolid degen\n";
+    let scene = StlDecoder::new().decode(s.as_bytes()).unwrap();
+    let r = validate(&scene, &ValidationOptions::default());
+    assert_eq!(r.degenerate_triangle_defects, 1);
+    assert_eq!(r.degenerate_triangle_examples.len(), 1);
+}
+
+#[test]
+fn degenerate_check_off_silences_rule() {
+    // Same input as the two-coincident-corner test but with the rule
+    // toggled off — counts must zero, examples must clear, but other
+    // rules continue to run.
+    let s = "solid degen\n\
+        facet normal 0 0 1\n\
+        outer loop\n\
+        vertex 0 0 0\n\
+        vertex 0 0 0\n\
+        vertex 1 0 0\n\
+        endloop\n\
+        endfacet\n\
+        endsolid degen\n";
+    let scene = StlDecoder::new().decode(s.as_bytes()).unwrap();
+    let opts = ValidationOptions {
+        check_degenerate_triangles: false,
+        ..ValidationOptions::default()
+    };
+    let r = validate(&scene, &opts);
+    assert_eq!(r.degenerate_triangle_defects, 0);
+    assert!(r.degenerate_triangle_examples.is_empty());
+    // Watertight rule still ran — boundary edges populated.
+    assert!(r.boundary_edges > 0);
+}
+
+#[test]
+fn degenerate_count_matches_repair_drop_count() {
+    // The diagnostic count must equal the number of triangles that
+    // `repair_drop_degenerate_triangles` would drop, by construction
+    // — both use bit-exact corner-pair equality. Cube + two
+    // degenerate trailing facets → 12 healthy + 2 degenerate = 14.
+    let mut bytes = unit_cube_binary_bytes();
+    // Patch the header triangle count from 12 → 14.
+    bytes[80..84].copy_from_slice(&14u32.to_le_bytes());
+    let push_tri = |buf: &mut Vec<u8>, v: [f32; 3]| {
+        for c in [0.0_f32, 0.0, 1.0] {
+            buf.extend_from_slice(&c.to_le_bytes());
+        }
+        for _ in 0..3 {
+            for c in v {
+                buf.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        buf.extend_from_slice(&0u16.to_le_bytes());
+    };
+    push_tri(&mut bytes, [5.0, 5.0, 5.0]);
+    push_tri(&mut bytes, [6.0, 6.0, 6.0]);
+
+    let scene = StlDecoder::new().decode(&bytes).unwrap();
+    let r = validate(&scene, &ValidationOptions::default());
+    assert_eq!(r.triangles_total, 14);
+    assert_eq!(r.degenerate_triangle_defects, 2, "report: {r:?}");
+    assert_eq!(r.degenerate_triangle_examples.len(), 2);
+
+    // Cross-check against the repair pass on a clone — same number.
+    let mut clone = scene.clone();
+    let drop_rep = oxideav_stl::repair_drop_degenerate_triangles(&mut clone);
+    assert_eq!(drop_rep.dropped_triangles, r.degenerate_triangle_defects);
+}
+
+#[test]
+fn degenerate_examples_cap_at_max_reported_defects() {
+    // 64 all-coincident-corner triangles via a synthetic binary
+    // stream — counts unbounded, examples capped at the
+    // `MAX_REPORTED_DEFECTS` constant.
+    let n: u32 = 64;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0u8; 80]);
+    bytes.extend_from_slice(&n.to_le_bytes());
+    for _ in 0..n {
+        for c in [0.0_f32, 0.0, 1.0] {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        for _ in 0..3 {
+            for c in [1.0_f32, 2.0, 3.0] {
+                bytes.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+    }
+    let scene = StlDecoder::new().decode(&bytes).unwrap();
+    let r = validate(&scene, &ValidationOptions::default());
+    assert_eq!(r.degenerate_triangle_defects, n as usize);
+    assert_eq!(r.degenerate_triangle_examples.len(), MAX_REPORTED_DEFECTS);
+}
+
+#[test]
+fn defects_by_rule_includes_degenerate_label() {
+    // The labelled breakdown must surface the new rule under the
+    // documented `"degenerate_triangle"` key so downstream metric
+    // / log pipelines can pick it up.
+    let r = ValidationReport::default();
+    let labels: Vec<&'static str> = r.defects_by_rule().iter().map(|(k, _)| *k).collect();
+    assert_eq!(labels.len(), 8);
+    assert!(labels.contains(&"degenerate_triangle"));
+
+    // Round-trip an actually-degenerate scene and check the count
+    // appears under the right label.
+    let s = "solid degen\n\
+        facet normal 0 0 1\n\
+        outer loop\n\
+        vertex 1 2 3\n\
+        vertex 1 2 3\n\
+        vertex 1 2 3\n\
+        endloop\n\
+        endfacet\n\
+        endsolid degen\n";
+    let scene = StlDecoder::new().decode(s.as_bytes()).unwrap();
+    let rep = validate(&scene, &ValidationOptions::default());
+    let by_rule: std::collections::HashMap<&str, usize> =
+        rep.defects_by_rule().iter().copied().collect();
+    assert_eq!(by_rule["degenerate_triangle"], 1);
+}
