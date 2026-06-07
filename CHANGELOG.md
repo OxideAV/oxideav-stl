@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 245 — `ValidationOptions::check_zero_area_triangles` (on by
+  default) + `ValidationOptions::zero_area_tolerance` knob, matching
+  `ValidationReport::zero_area_triangle_defects` count and
+  `zero_area_triangle_examples` capped illustrative list, and the
+  new `DEFAULT_ZERO_AREA_TOLERANCE` constant (`f32::EPSILON`).
+  Detects triangles whose three corners are pairwise distinct under
+  bit-equality yet sit on a single straight line — the cross product
+  of two edge vectors vanishes, so §6.5's right-hand-rule clause
+  cannot pick a unique outward direction. Disjoint from
+  `check_degenerate_triangles` (which fires on bit-equal corners): a
+  face that already trips the corner-coincidence rule is silently
+  skipped here so the two counts describe non-overlapping populations
+  and add cleanly into the report totals. The check is `O(N)` (single
+  forward pass, one cross-product magnitude probe per face) and
+  piggybacks on the main validate loop. Brings the validation rule
+  set from eight to nine; `is_clean()`, `defect_total()`, and
+  `defects_by_rule()` pick up the new field, the latter now returning
+  a nine-entry array with the new `"zero_area_triangle"` label pinned
+  at the tail. Non-finite corners propagate through to a NaN cross
+  product and are treated as zero-area (mirroring `recompute_normal`'s
+  sentinel-return behaviour). Negative / non-finite tolerances clamp
+  to the default so the rule cannot be silently disabled.
+
 - Round 242 — `ValidationOptions::check_degenerate_triangles` (on by
   default) + matching `ValidationReport::degenerate_triangle_defects`
   count and `degenerate_triangle_examples` capped illustrative list.

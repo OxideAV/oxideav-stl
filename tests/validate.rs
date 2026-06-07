@@ -488,8 +488,9 @@ fn defects_by_rule_includes_degenerate_label() {
     // / log pipelines can pick it up.
     let r = ValidationReport::default();
     let labels: Vec<&'static str> = r.defects_by_rule().iter().map(|(k, _)| *k).collect();
-    assert_eq!(labels.len(), 8);
+    assert_eq!(labels.len(), 9);
     assert!(labels.contains(&"degenerate_triangle"));
+    assert!(labels.contains(&"zero_area_triangle"));
 
     // Round-trip an actually-degenerate scene and check the count
     // appears under the right label.

@@ -487,6 +487,29 @@ not the geometry), and disjoint from the watertight rule (degenerate
 triangles still contribute their three edges to the edge-use map and
 can fool watertightness on their own).
 
+### Zero-area-triangle rule
+
+A face whose three corners are pairwise distinct under bit-equality
+can still be collinear — three corners that sit on a single straight
+line have a zero cross product, so the spec's right-hand-rule clause
+cannot pick a unique outward direction either.
+`ValidationOptions::check_zero_area_triangles` (on by default)
+surfaces every such face on `zero_area_triangle_defects` plus a
+capped illustrative list on `zero_area_triangle_examples`. The check
+is `O(N)` (one cross-product magnitude probe per face) and piggybacks
+on the main validate loop. Tolerance is configurable via
+`ValidationOptions::zero_area_tolerance` (defaults to
+`DEFAULT_ZERO_AREA_TOLERANCE` = `f32::EPSILON`); negative or
+non-finite values clamp to the default so the rule is never silently
+disabled. Faces that already trip the corner-coincidence rule
+(`check_degenerate_triangles`) are silently skipped here so the two
+counts describe disjoint populations and add cleanly into the report
+totals. The canonical worked example `(0,0,0)`, `(1,1,1)`, `(2,2,2)`
+shows the gap: those three corners are bit-distinct (so the
+corner-coincidence rule does not fire) yet they sit on the body
+diagonal of the unit cube, so the cross product is `(0, 0, 0)` and
+no outward normal exists.
+
 ## Topology utilities
 
 Opt-in, non-mutating analysis of the triangle soup lives in

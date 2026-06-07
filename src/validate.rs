@@ -77,6 +77,19 @@ pub const DEFAULT_UNIT_NORMAL_TOLERANCE: f32 = 1.0e-3;
 /// degenerate but legitimately corner-touching triangulations.
 pub const DEFAULT_T_JUNCTION_TOLERANCE: f32 = 1.0e-5;
 
+/// Default tolerance for "the cross product of two edge vectors is the
+/// zero vector" — used by the zero-area-triangle rule to flag corners
+/// that are pairwise distinct under bit-equality yet sit on a single
+/// straight line (so the cross product still vanishes). Matches the
+/// `eps` floor used inside `recompute_normal` for the same reason: a
+/// triangle whose recomputed normal would be the spec's zero sentinel
+/// has no well-defined outward direction and therefore cannot satisfy
+/// §6.5's right-hand-rule clause. Picked at `f32::EPSILON` so the rule
+/// stays a hard "the math gives back zero" check rather than a fuzzy
+/// area filter — slicers that want to drop hairline-thin facets do so
+/// from their own area threshold, not from this diagnostic.
+pub const DEFAULT_ZERO_AREA_TOLERANCE: f32 = f32::EPSILON;
+
 /// Per-vertex axis-aligned bounding box for a [`Scene3D`].
 ///
 /// All coordinates are taken as-is from the scene's `Triangles`
@@ -568,6 +581,29 @@ pub struct ValidationOptions {
     /// [`Self::check_unit_normal`] (which inspects the *stored*
     /// normal, not the geometry).
     pub check_degenerate_triangles: bool,
+    /// Whether to apply the zero-area check — a triangle whose three
+    /// corners are pairwise distinct under bit-equality yet sit on
+    /// one straight line still has a zero cross product, so the
+    /// spec's right-hand-rule clause cannot pick a unique outward
+    /// direction either. Default `true`. The check is `O(N)` (single
+    /// forward pass; one cross-product magnitude probe per face) and
+    /// piggybacks on the main validate loop. Disjoint from
+    /// [`Self::check_degenerate_triangles`]: that rule fires on
+    /// corner-coincidence (any two of `(v0, v1, v2)` bit-equal), this
+    /// one fires on the remaining "distinct corners, vanishing
+    /// cross product" case. A face that already trips the corner-
+    /// coincidence rule is silently skipped here so the two counts
+    /// describe disjoint populations and add cleanly into the report
+    /// totals. Tolerance is configurable via
+    /// [`Self::zero_area_tolerance`].
+    pub check_zero_area_triangles: bool,
+    /// Tolerance used by the zero-area rule — the cross product of two
+    /// edge vectors must have magnitude `> eps` for the face to pass.
+    /// Default [`DEFAULT_ZERO_AREA_TOLERANCE`]; negative or non-finite
+    /// values clamp to the default so the rule is never silently
+    /// disabled by a pathological caller. Used only when
+    /// [`Self::check_zero_area_triangles`] is on.
+    pub zero_area_tolerance: f32,
 }
 
 impl Default for ValidationOptions {
@@ -583,6 +619,8 @@ impl Default for ValidationOptions {
             t_junction_tolerance: DEFAULT_T_JUNCTION_TOLERANCE,
             check_consistent_winding: true,
             check_degenerate_triangles: true,
+            check_zero_area_triangles: true,
+            zero_area_tolerance: DEFAULT_ZERO_AREA_TOLERANCE,
         }
     }
 }
@@ -673,6 +711,22 @@ pub struct ValidationReport {
     /// from `degenerate_triangle_defects`. Reported in scan order
     /// across `meshes → primitives → faces`.
     pub degenerate_triangle_examples: Vec<FaceLocator>,
+    /// Total count of triangles whose three corner positions are
+    /// pairwise distinct under bit-equality yet sit on a single
+    /// straight line, so the cross product of their edge vectors has
+    /// magnitude `<=` [`ValidationOptions::zero_area_tolerance`]. The
+    /// spec's right-hand-rule clause cannot pick a unique outward
+    /// direction on such a face. Zero when
+    /// [`ValidationOptions::check_zero_area_triangles`] is off. Faces
+    /// that already trip the corner-coincidence rule
+    /// ([`Self::degenerate_triangle_defects`]) are silently skipped
+    /// here so the two counts describe disjoint populations and add
+    /// cleanly into the report totals.
+    pub zero_area_triangle_defects: usize,
+    /// Up to [`MAX_REPORTED_DEFECTS`] illustrative facet locations
+    /// from `zero_area_triangle_defects`. Reported in scan order
+    /// across `meshes → primitives → faces`.
+    pub zero_area_triangle_examples: Vec<FaceLocator>,
 }
 
 impl ValidationReport {
@@ -687,6 +741,7 @@ impl ValidationReport {
             && self.t_junction_defects == 0
             && self.inconsistent_winding_edges == 0
             && self.degenerate_triangle_defects == 0
+            && self.zero_area_triangle_defects == 0
     }
 
     /// Sum of every per-rule defect count in the report — a single
@@ -694,14 +749,14 @@ impl ValidationReport {
     /// by their overall validity rather than inspect each rule's
     /// counters individually.
     ///
-    /// The sum is the arithmetic total across all eight defect
+    /// The sum is the arithmetic total across all nine defect
     /// counters (`facet_orientation_defects`, `non_unit_normal_defects`,
     /// `positive_octant_defects`, `boundary_edges`, `non_manifold_edges`,
     /// `t_junction_defects`, `inconsistent_winding_edges`,
-    /// `degenerate_triangle_defects`). Counters for rules whose
-    /// [`ValidationOptions`] toggle is off are zero by construction
-    /// and contribute nothing to the sum, so the number is bounded
-    /// by the rule set actually run.
+    /// `degenerate_triangle_defects`, `zero_area_triangle_defects`).
+    /// Counters for rules whose [`ValidationOptions`] toggle is off are
+    /// zero by construction and contribute nothing to the sum, so the
+    /// number is bounded by the rule set actually run.
     ///
     /// Returns `0` iff [`Self::is_clean`] returns `true`; the converse
     /// also holds — these two predicates encode the same invariant
@@ -715,6 +770,7 @@ impl ValidationReport {
             + self.t_junction_defects
             + self.inconsistent_winding_edges
             + self.degenerate_triangle_defects
+            + self.zero_area_triangle_defects
     }
 
     /// Labeled breakdown of every per-rule defect count, in the same
@@ -736,9 +792,10 @@ impl ValidationReport {
     /// log keys: `"facet_orientation"`, `"non_unit_normal"`,
     /// `"positive_octant"`, `"boundary_edges"`,
     /// `"non_manifold_edges"`, `"t_junction"`,
-    /// `"inconsistent_winding"`, `"degenerate_triangle"`. The eight
-    /// entries' counts sum to [`Self::defect_total`].
-    pub fn defects_by_rule(&self) -> [(&'static str, usize); 8] {
+    /// `"inconsistent_winding"`, `"degenerate_triangle"`,
+    /// `"zero_area_triangle"`. The nine entries' counts sum to
+    /// [`Self::defect_total`].
+    pub fn defects_by_rule(&self) -> [(&'static str, usize); 9] {
         [
             ("facet_orientation", self.facet_orientation_defects),
             ("non_unit_normal", self.non_unit_normal_defects),
@@ -748,6 +805,7 @@ impl ValidationReport {
             ("t_junction", self.t_junction_defects),
             ("inconsistent_winding", self.inconsistent_winding_edges),
             ("degenerate_triangle", self.degenerate_triangle_defects),
+            ("zero_area_triangle", self.zero_area_triangle_defects),
         ]
     }
 }
@@ -831,15 +889,47 @@ pub fn validate(scene: &Scene3D, opts: &ValidationOptions) -> ValidationReport {
                 // diagnostic count is the same number the repair pass
                 // would drop. Three corner pairs to check; any one
                 // collision makes the face degenerate.
-                if opts.check_degenerate_triangles {
-                    let eq = |a: [f32; 3], b: [f32; 3]| -> bool {
-                        a[0].to_bits() == b[0].to_bits()
-                            && a[1].to_bits() == b[1].to_bits()
-                            && a[2].to_bits() == b[2].to_bits()
+                let eq = |a: [f32; 3], b: [f32; 3]| -> bool {
+                    a[0].to_bits() == b[0].to_bits()
+                        && a[1].to_bits() == b[1].to_bits()
+                        && a[2].to_bits() == b[2].to_bits()
+                };
+                let corners_coincide = eq(v0, v1) || eq(v1, v2) || eq(v0, v2);
+                if opts.check_degenerate_triangles && corners_coincide {
+                    rep.degenerate_triangle_defects += 1;
+                    push_capped(&mut rep.degenerate_triangle_examples, loc);
+                }
+
+                // Zero-area rule. Disjoint from the corner-coincidence
+                // rule above — we skip faces whose corners already
+                // collide bit-exactly so the two counts describe
+                // separate populations. Same cross-product math as
+                // `recompute_normal`: pairwise-distinct corners can
+                // still be collinear, which gives a zero cross product
+                // and no well-defined outward normal. Tolerance clamps
+                // to the default on negative / non-finite values.
+                if opts.check_zero_area_triangles && !corners_coincide {
+                    let eps = if opts.zero_area_tolerance.is_finite()
+                        && opts.zero_area_tolerance >= 0.0
+                    {
+                        opts.zero_area_tolerance
+                    } else {
+                        DEFAULT_ZERO_AREA_TOLERANCE
                     };
-                    if eq(v0, v1) || eq(v1, v2) || eq(v0, v2) {
-                        rep.degenerate_triangle_defects += 1;
-                        push_capped(&mut rep.degenerate_triangle_examples, loc);
+                    let u = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+                    let w = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
+                    let cx = u[1] * w[2] - u[2] * w[1];
+                    let cy = u[2] * w[0] - u[0] * w[2];
+                    let cz = u[0] * w[1] - u[1] * w[0];
+                    let mag = (cx * cx + cy * cy + cz * cz).sqrt();
+                    // `mag.is_nan()` propagates from non-finite vertex
+                    // coordinates; we treat the face as zero-area in
+                    // that case too, mirroring `recompute_normal`'s
+                    // sentinel-return behaviour for the pathological
+                    // input.
+                    if !mag.is_finite() || mag <= eps {
+                        rep.zero_area_triangle_defects += 1;
+                        push_capped(&mut rep.zero_area_triangle_examples, loc);
                     }
                 }
 
@@ -2631,7 +2721,7 @@ mod tests {
         );
         let r = validate(&scene, &ValidationOptions::default());
         let rows = r.defects_by_rule();
-        assert_eq!(rows.len(), 8);
+        assert_eq!(rows.len(), 9);
         let labels: Vec<&'static str> = rows.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
@@ -2644,6 +2734,7 @@ mod tests {
                 "t_junction",
                 "inconsistent_winding",
                 "degenerate_triangle",
+                "zero_area_triangle",
             ]
         );
         let summed: usize = rows.iter().map(|(_, n)| *n).sum();
@@ -2681,5 +2772,178 @@ mod tests {
         assert!(positive_row.1 > 0);
         let summed: usize = rows.iter().map(|(_, n)| *n).sum();
         assert_eq!(r.defect_total(), summed);
+    }
+
+    /// A triangle whose three corners are pairwise bit-distinct yet
+    /// sit on a single straight line trips the zero-area rule. The
+    /// canonical example `(0,0,0)`, `(1,1,1)`, `(2,2,2)` has all
+    /// pairwise differences proportional to `(1,1,1)`, so the cross
+    /// product is `(0,0,0)` exactly. The corner-coincidence rule does
+    /// NOT fire (the three positions are bit-distinct), so this is a
+    /// strictly new defect class.
+    #[test]
+    fn zero_area_collinear_distinct_corners_is_flagged() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let r = validate(&scene, &ValidationOptions::default());
+        assert_eq!(r.zero_area_triangle_defects, 1);
+        assert_eq!(r.zero_area_triangle_examples.len(), 1);
+        assert_eq!(r.degenerate_triangle_defects, 0);
+    }
+
+    /// A face whose corners coincide bit-exactly is reported under
+    /// `degenerate_triangle_defects` and silently skipped by the
+    /// zero-area rule — the two populations are disjoint by
+    /// construction.
+    #[test]
+    fn zero_area_skips_coincident_corner_faces() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let r = validate(&scene, &ValidationOptions::default());
+        assert_eq!(r.degenerate_triangle_defects, 1);
+        assert_eq!(r.zero_area_triangle_defects, 0);
+    }
+
+    /// A non-collinear unit triangle has a non-zero cross product and
+    /// passes the zero-area rule cleanly.
+    #[test]
+    fn zero_area_clean_unit_triangle_passes() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let r = validate(&scene, &ValidationOptions::default());
+        assert_eq!(r.zero_area_triangle_defects, 0);
+        assert!(r.zero_area_triangle_examples.is_empty());
+    }
+
+    /// With `check_zero_area_triangles = false` the counter stays at
+    /// zero even on a clearly collinear face.
+    #[test]
+    fn zero_area_check_off_skips_collinear_face() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let opts = ValidationOptions {
+            check_zero_area_triangles: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.zero_area_triangle_defects, 0);
+    }
+
+    /// Negative or non-finite tolerances clamp to the default so the
+    /// rule is never silently disabled.
+    #[test]
+    fn zero_area_negative_tolerance_clamps_to_default() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let opts = ValidationOptions {
+            zero_area_tolerance: -1.0,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.zero_area_triangle_defects, 1);
+
+        let opts = ValidationOptions {
+            zero_area_tolerance: f32::NAN,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.zero_area_triangle_defects, 1);
+    }
+
+    /// The `"zero_area_triangle"` label appears in `defects_by_rule`
+    /// at the canonical tail position; the sum invariant holds.
+    #[test]
+    fn zero_area_defects_by_rule_label_at_tail() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let r = validate(&scene, &ValidationOptions::default());
+        let rows = r.defects_by_rule();
+        assert_eq!(rows.last().map(|(l, _)| *l), Some("zero_area_triangle"));
+        let row = rows
+            .iter()
+            .find(|(l, _)| *l == "zero_area_triangle")
+            .unwrap();
+        assert_eq!(row.1, 1);
+        let summed: usize = rows.iter().map(|(_, n)| *n).sum();
+        assert_eq!(r.defect_total(), summed);
+        assert!(!r.is_clean());
+    }
+
+    /// The illustrative example list caps at `MAX_REPORTED_DEFECTS`
+    /// while the count itself stays unbounded. A scene with more
+    /// collinear faces than the cap exercises both invariants in one
+    /// scan.
+    #[test]
+    fn zero_area_examples_capped_at_max_reported_defects() {
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let n = MAX_REPORTED_DEFECTS + 5;
+        for i in 0..n {
+            let base = i as f32;
+            // Three collinear corners along x = y = z, shifted per
+            // face so the faces remain bit-distinct from each other
+            // (but each face is internally collinear).
+            positions.push([base, base, base]);
+            positions.push([base + 1.0, base + 1.0, base + 1.0]);
+            positions.push([base + 2.0, base + 2.0, base + 2.0]);
+        }
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions = positions;
+        let mut scene = Scene3D::new();
+        scene.add_mesh(Mesh::new(None::<String>).with_primitive(prim));
+        let opts = ValidationOptions {
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            check_watertight: false,
+            check_consistent_winding: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert_eq!(r.zero_area_triangle_defects, n);
+        assert_eq!(r.zero_area_triangle_examples.len(), MAX_REPORTED_DEFECTS);
+    }
+
+    /// A face with a non-finite corner has a non-finite cross product
+    /// magnitude; we treat that as zero-area (the recomputed normal
+    /// would be the zero sentinel anyway).
+    #[test]
+    fn zero_area_non_finite_corner_is_flagged() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [f32::NAN, 1.0, 0.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let r = validate(&scene, &ValidationOptions::default());
+        assert_eq!(r.zero_area_triangle_defects, 1);
+    }
+
+    /// `is_clean` picks up the new rule — a scene whose only defect is
+    /// a collinear face reports `!is_clean()` and `defect_total() == 1`.
+    #[test]
+    fn zero_area_breaks_is_clean_invariant() {
+        let scene = one_facet(
+            vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]],
+            [0.0, 0.0, 1.0],
+        );
+        let opts = ValidationOptions {
+            check_facet_orientation: false,
+            check_unit_normal: false,
+            check_watertight: false,
+            check_consistent_winding: false,
+            ..ValidationOptions::default()
+        };
+        let r = validate(&scene, &opts);
+        assert!(!r.is_clean());
+        assert_eq!(r.defect_total(), 1);
     }
 }
