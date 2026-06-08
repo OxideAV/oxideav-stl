@@ -211,6 +211,44 @@ impl Bbox {
         Self { min: p, max: p }
     }
 
+    /// Bounding box of an arbitrary point stream — the smallest
+    /// axis-aligned box that contains every finite point in `points`.
+    /// Non-finite components are silently skipped (mirroring the
+    /// silent-skip behaviour [`bbox`] applies to non-finite vertex
+    /// coordinates in a `Scene3D`), so a point whose every coordinate
+    /// is non-finite contributes nothing and a point with two finite
+    /// coordinates and one `NaN` contributes only on the two finite
+    /// axes.
+    ///
+    /// Returns [`None`] when no point contributes a finite coordinate on
+    /// any axis — an empty iterator, or an iterator whose every point
+    /// is fully non-finite.
+    ///
+    /// Useful for callers building a bbox outside the `Scene3D` walker —
+    /// e.g. after [`Self::corners`] + a non-axis-aligned transform when
+    /// computing the bbox of a rotated box (`bb.corners().into_iter()
+    /// .map(rotate).collect()` → `Bbox::from_points`), for point-cloud
+    /// pre-flights that haven't been wrapped in a `Triangles` primitive
+    /// yet, or for any reduction over an ad-hoc sample of vertex
+    /// coordinates. Equivalent to seeding with `Bbox::point` on the
+    /// first finite-bearing point and folding [`Self::merge`] over the
+    /// rest, but a single allocation-free forward pass that doesn't
+    /// reject mid-iteration non-finite slots.
+    ///
+    /// `from_points([p])` on a fully-finite `p` produces the same bbox
+    /// as [`Self::point(p)`](Self::point); `from_points(bb.corners())`
+    /// on any non-degenerate `bb` round-trips to a box equal to `bb`.
+    pub fn from_points<I>(points: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = [f32; 3]>,
+    {
+        let mut acc = BboxAccumulator::new();
+        for p in points {
+            acc.add(p);
+        }
+        acc.finish()
+    }
+
     /// Component-wise union of two bounding boxes — the smallest
     /// axis-aligned box that contains every point in either input.
     /// `merge` is commutative and associative, so an accumulation
@@ -1654,6 +1692,96 @@ mod tests {
         for p in &points {
             assert!(acc.contains_point(*p));
         }
+    }
+
+    #[test]
+    fn bbox_from_points_empty_returns_none() {
+        let empty: [[f32; 3]; 0] = [];
+        assert!(Bbox::from_points(empty).is_none());
+    }
+
+    #[test]
+    fn bbox_from_points_single_point_matches_point_seed() {
+        let p = [1.0_f32, 2.0, 3.0];
+        let from_iter = Bbox::from_points([p]).unwrap();
+        let from_point = Bbox::point(p);
+        assert_eq!(from_iter, from_point);
+        assert!(from_iter.is_degenerate());
+    }
+
+    #[test]
+    fn bbox_from_points_hull_matches_merged_singletons() {
+        // The fold-merge-Bbox::point reduction and the new
+        // Bbox::from_points constructor must produce the same hull on
+        // any finite-coordinate input.
+        let points: [[f32; 3]; 4] = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.5, 0.5],
+            [-0.5, 2.0, 0.5],
+            [0.5, 0.5, 3.0],
+        ];
+        let mut acc = Bbox::point(points[0]);
+        for p in &points[1..] {
+            acc = acc.merge(&Bbox::point(*p));
+        }
+        let direct = Bbox::from_points(points).unwrap();
+        assert_eq!(direct, acc);
+        // Each input point is inside the hull (inclusive on every face).
+        for p in &points {
+            assert!(direct.contains_point(*p));
+        }
+    }
+
+    #[test]
+    fn bbox_from_points_round_trips_corners() {
+        // `bb.corners()` enumerates every extreme point of the box, so
+        // re-bounding the eight corners must reproduce the original bbox
+        // exactly for any non-degenerate input.
+        let bb = Bbox {
+            min: [-1.0, 0.0, 2.0],
+            max: [3.0, 4.0, 5.0],
+        };
+        let rebuilt = Bbox::from_points(bb.corners()).unwrap();
+        assert_eq!(rebuilt, bb);
+    }
+
+    #[test]
+    fn bbox_from_points_skips_non_finite_per_component() {
+        // NaN on the x slot of point 0 + +inf on the y slot of point 1
+        // are silently skipped per-component; the remaining finite slots
+        // (x in {1, 0}, y in {0, 1}, z in {0, 0}) drive the hull. Matches
+        // the silent-skip behaviour the `bbox` scene-walker applies to
+        // non-finite vertex coordinates.
+        let bb = Bbox::from_points([
+            [f32::NAN, 0.0, 0.0],
+            [1.0, f32::INFINITY, 0.0],
+            [0.0, 1.0, 0.0],
+        ])
+        .unwrap();
+        assert_eq!(bb.min, [0.0, 0.0, 0.0]);
+        assert_eq!(bb.max, [1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn bbox_from_points_all_non_finite_returns_none() {
+        // No finite coordinate on any axis → None, same convention as
+        // the scene-wide `bbox` walker.
+        let bb = Bbox::from_points([
+            [f32::NAN, f32::NAN, f32::NAN],
+            [f32::INFINITY, f32::NEG_INFINITY, f32::NAN],
+        ]);
+        assert!(bb.is_none());
+    }
+
+    #[test]
+    fn bbox_from_points_accepts_iterators_lazily() {
+        // `from_points` takes `IntoIterator`, so map/filter chains feed
+        // straight in without an intermediate Vec — exercised here with a
+        // generator that applies a translation on the fly.
+        let raw: [[f32; 3]; 3] = [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0], [-1.0, 0.5, 2.0]];
+        let bb = Bbox::from_points(raw.iter().map(|p| [p[0] + 10.0, p[1], p[2]])).unwrap();
+        assert_eq!(bb.min, [9.0, 0.0, 0.0]);
+        assert_eq!(bb.max, [11.0, 2.0, 3.0]);
     }
 
     #[test]

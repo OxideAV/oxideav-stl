@@ -399,6 +399,36 @@ each corner and re-bounding the transformed set. A degenerate
 bbox (one or more zero extents) collapses pairs of corners onto
 each other but the eight-slot layout is preserved.
 
+`Bbox::from_points` is the matching reduction constructor —
+takes any `IntoIterator<Item = [f32; 3]>` and returns the smallest
+axis-aligned hull, or `None` if no point contributes a finite
+coordinate on any axis:
+
+```rust
+use oxideav_stl::Bbox;
+
+// Compute a translated bbox without re-walking the scene: pair
+// `corners()` with the per-corner transform and feed the stream
+// straight into `from_points`.
+let bb = Bbox { min: [0.0, 0.0, 0.0], max: [2.0, 3.0, 4.0] };
+let shift = [10.0_f32, 20.0, 30.0];
+let translated = Bbox::from_points(
+    bb.corners().into_iter().map(|c| [c[0] + shift[0], c[1] + shift[1], c[2] + shift[2]])
+).unwrap();
+assert_eq!(translated.min, [10.0, 20.0, 30.0]);
+assert_eq!(translated.max, [12.0, 23.0, 34.0]);
+```
+
+Non-finite components on individual points are silently skipped
+per-axis (matching the silent-skip behaviour `bbox` applies to
+non-finite vertex coordinates in a `Scene3D`), so a point with two
+finite slots and one `NaN` still contributes on the two finite
+axes. `from_points(bb.corners())` round-trips to a box equal to
+`bb` for any non-degenerate input; `from_points([p])` on a
+fully-finite `p` is identical to `Bbox::point(p)`. Single
+allocation-free forward pass; `IntoIterator` lets `map`/`filter`
+chains feed straight in without an intermediate `Vec`.
+
 `ValidationReport` carries a yes/no `is_clean()` predicate plus two
 quantitative summaries for tooling that wants to log or sort scenes
 by overall defect count:

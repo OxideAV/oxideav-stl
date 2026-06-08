@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 257 — `Bbox::from_points` reduction constructor: takes any
+  `IntoIterator<Item = [f32; 3]>` and returns
+  `Option<Bbox>` — the smallest axis-aligned hull that contains every
+  finite point in the stream, or `None` if no point contributes a
+  finite coordinate on any axis. Non-finite components on individual
+  points are silently skipped per-axis (matching the silent-skip
+  behaviour `bbox` applies to non-finite vertex coordinates in a
+  `Scene3D`), so a point with two finite slots and one `NaN` still
+  contributes on the two finite axes. The missing primitive that lets
+  callers build a `Bbox` without going through the `Scene3D` walker —
+  pairs naturally with `Bbox::corners()` for "compute the bbox after a
+  non-axis-aligned transform" (translated / rotated parts) by feeding
+  the transformed corner stream straight into the constructor in a
+  single forward pass. `from_points([p])` on a fully-finite `p`
+  produces the same bbox as `Bbox::point(p)`;
+  `from_points(bb.corners())` round-trips to a box equal to `bb` for
+  any non-degenerate input. Allocation-free; `IntoIterator` lets
+  `map`/`filter` chains feed straight in without an intermediate
+  `Vec`. Internally a single forward pass over the same
+  `BboxAccumulator` that powers the `bbox` / `bbox_of_mesh` /
+  `bbox_of_primitive` scene walkers, so the silent-skip semantics
+  cannot diverge.
+
 - Round 245 — `ValidationOptions::check_zero_area_triangles` (on by
   default) + `ValidationOptions::zero_area_tolerance` knob, matching
   `ValidationReport::zero_area_triangle_defects` count and

@@ -438,3 +438,64 @@ fn degenerate_bbox_collapses_corner_pairs_but_keeps_eight_slots() {
         assert_eq!(corner, [7.0, 7.0, 7.0]);
     }
 }
+
+// ---- Round 257: `Bbox::from_points` ----------------------------------------
+
+#[test]
+fn from_points_decoded_brick_matches_scene_bbox() {
+    // Build the brick scene's bbox two ways: via the scene-walker
+    // (`bbox`) and via the corner-iterator constructor
+    // (`Bbox::from_points`). They must agree exactly: the corners are
+    // the brick's extreme points, so re-bounding them reproduces the
+    // original axis-aligned hull.
+    let scene = brick_2_3_4_scene();
+    let from_walker = bbox(&scene).expect("brick has a bbox");
+    let from_corners = Bbox::from_points(from_walker.corners()).expect("8 finite corners");
+    assert_eq!(from_corners, from_walker);
+}
+
+#[test]
+fn from_points_survives_binary_roundtrip() {
+    // Same scene through the binary encode/decode loop — the
+    // `from_points(corners())` reduction is bit-exact under the
+    // f32-preserving roundtrip.
+    let scene = brick_2_3_4_scene();
+    let bytes = StlEncoder::new_binary().encode(&scene).unwrap();
+    let decoded = StlDecoder::new().decode(&bytes).unwrap();
+    let bb = bbox(&decoded).unwrap();
+    let rebuilt = Bbox::from_points(bb.corners()).unwrap();
+    assert_eq!(rebuilt, bb);
+}
+
+#[test]
+fn from_points_translated_corners_match_translated_bbox() {
+    // Worked use-case for the constructor: build the bbox of the
+    // brick's corners after a non-rotational transform (here a pure
+    // translation by [10, 20, 30]) without round-tripping the scene
+    // through a fresh decode. The translated bbox is the original
+    // bbox shifted by the same vector — `Bbox::from_points` lets the
+    // caller compute it in a single pass over the corner stream.
+    let scene = brick_2_3_4_scene();
+    let bb = bbox(&scene).unwrap();
+    let shift = [10.0_f32, 20.0, 30.0];
+    let translated = Bbox::from_points(
+        bb.corners()
+            .into_iter()
+            .map(|c| [c[0] + shift[0], c[1] + shift[1], c[2] + shift[2]]),
+    )
+    .unwrap();
+    assert_eq!(translated.min, [10.0, 20.0, 30.0]);
+    assert_eq!(translated.max, [12.0, 23.0, 34.0]);
+    // Centre shifts by the same vector.
+    let c0 = bb.centre();
+    let c1 = translated.centre();
+    assert_eq!(c1[0] - c0[0], shift[0]);
+    assert_eq!(c1[1] - c0[1], shift[1]);
+    assert_eq!(c1[2] - c0[2], shift[2]);
+}
+
+#[test]
+fn from_points_empty_scene_swarm_returns_none() {
+    let empty: Vec<[f32; 3]> = Vec::new();
+    assert!(Bbox::from_points(empty).is_none());
+}
