@@ -499,3 +499,67 @@ fn from_points_empty_scene_swarm_returns_none() {
     let empty: Vec<[f32; 3]> = Vec::new();
     assert!(Bbox::from_points(empty).is_none());
 }
+
+// ------------------------------------------------------------------
+// Round 266 — `Bbox::translated(delta)` typed pure-shift helper.
+// ------------------------------------------------------------------
+
+#[test]
+fn translated_brick_matches_corner_rebuild() {
+    // The typed `translated` is the cheap dual of the manual
+    // `corners() -> map -> from_points` reduction the README's
+    // `from_points` worked example demonstrates: both produce the same
+    // box, but `translated` skips the eight-corner walk + rebuild.
+    let scene = brick_2_3_4_scene();
+    let bb = bbox(&scene).unwrap();
+    let shift = [10.0_f32, 20.0, 30.0];
+    let via_corners = Bbox::from_points(
+        bb.corners()
+            .into_iter()
+            .map(|c| [c[0] + shift[0], c[1] + shift[1], c[2] + shift[2]]),
+    )
+    .unwrap();
+    let via_typed = bb.translated(shift);
+    assert_eq!(via_corners, via_typed);
+    assert_eq!(via_typed.min, [10.0, 20.0, 30.0]);
+    assert_eq!(via_typed.max, [12.0, 23.0, 34.0]);
+}
+
+#[test]
+fn translated_preserves_scene_shape_invariants() {
+    // Shape invariants — extents, volume, surface area, diagonal
+    // length, longest axis — survive any pure shift unchanged.
+    let scene = brick_2_3_4_scene();
+    let bb = bbox(&scene).unwrap();
+    let t = bb.translated([-100.0, 50.0, 0.5]);
+    assert_eq!(t.extents(), bb.extents());
+    assert_eq!(t.volume(), bb.volume());
+    assert_eq!(t.surface_area(), bb.surface_area());
+    assert_eq!(t.diagonal_length(), bb.diagonal_length());
+    assert_eq!(t.longest_axis(), bb.longest_axis());
+    assert_eq!(t.is_degenerate(), bb.is_degenerate());
+}
+
+#[test]
+fn translated_survives_binary_roundtrip() {
+    // Decode/re-encode/re-decode shouldn't perturb the translated
+    // bbox — the floats are bit-identical through the binary path.
+    let scene = brick_2_3_4_scene();
+    let bytes = StlEncoder::new_binary().encode(&scene).unwrap();
+    let decoded = StlDecoder::new().decode(&bytes).unwrap();
+    let bb = bbox(&decoded).unwrap();
+    let d = [7.0_f32, -3.0, 11.0];
+    let t = bb.translated(d);
+    assert_eq!(t.min, [7.0, -3.0, 11.0]);
+    assert_eq!(t.max, [9.0, 0.0, 15.0]);
+    // Round-trip with the negated shift returns to the original bbox.
+    let neg = [-d[0], -d[1], -d[2]];
+    assert_eq!(t.translated(neg), bb);
+}
+
+#[test]
+fn translated_zero_delta_is_identity_on_decoded_scene() {
+    let scene = brick_2_3_4_scene();
+    let bb = bbox(&scene).unwrap();
+    assert_eq!(bb.translated([0.0, 0.0, 0.0]), bb);
+}

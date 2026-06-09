@@ -297,6 +297,45 @@ impl Bbox {
         }
     }
 
+    /// Box translated by `delta` — adds `delta[axis]` to both `min[axis]`
+    /// and `max[axis]` on every axis. Extents, centre offset from the
+    /// translated `min`, volume, surface area, diagonal length, longest
+    /// axis, and degeneracy are all preserved (a pure shift is rigid: it
+    /// only changes the absolute position of the box, not its shape).
+    ///
+    /// Useful for slicer pre-flight pipelines that need to ask "where would
+    /// this part bbox land after a `delta` shift on the build plate?"
+    /// without re-walking the geometry — pair it with
+    /// [`Self::contains_bbox`] for "still fits inside the build envelope?"
+    /// or [`Self::intersects`] for "would it collide with another already-
+    /// placed part?". Component-wise dual of `repair_translate_to_positive_
+    /// octant`'s scene-level shift — the `delta` reported by that repair's
+    /// `TranslateOctantReport` fed through `translated` reproduces the
+    /// post-repair scene bbox.
+    ///
+    /// Non-finite `delta` components propagate through the component-wise
+    /// addition; finite inputs are guaranteed to produce finite outputs.
+    /// `translated([0.0; 3])` is the identity; `translated(-d).translated(d)`
+    /// round-trips to the original box for any finite `d`. Equivalent to
+    /// (but considerably cheaper than) `Bbox::from_points(self.corners()
+    /// .into_iter().map(|c| [c[0] + delta[0], c[1] + delta[1], c[2] +
+    /// delta[2]]))` — the corners-then-rebuild pattern the
+    /// [`Self::from_points`] worked example demonstrates manually.
+    pub fn translated(&self, delta: [f32; 3]) -> Bbox {
+        Bbox {
+            min: [
+                self.min[0] + delta[0],
+                self.min[1] + delta[1],
+                self.min[2] + delta[2],
+            ],
+            max: [
+                self.max[0] + delta[0],
+                self.max[1] + delta[1],
+                self.max[2] + delta[2],
+            ],
+        }
+    }
+
     /// Whether two bounding boxes overlap on every axis (inclusive on
     /// every face — boxes that touch on exactly one face share that
     /// face and count as intersecting). Symmetric
@@ -1840,6 +1879,100 @@ mod tests {
             assert!(s.min[axis] > s.max[axis]);
         }
         assert!(s.is_degenerate());
+    }
+
+    #[test]
+    fn bbox_translated_shifts_min_and_max_equally() {
+        let bb = Bbox {
+            min: [1.0, 2.0, 3.0],
+            max: [4.0, 6.0, 8.0],
+        };
+        let t = bb.translated([10.0, -5.0, 0.5]);
+        assert_eq!(t.min, [11.0, -3.0, 3.5]);
+        assert_eq!(t.max, [14.0, 1.0, 8.5]);
+    }
+
+    #[test]
+    fn bbox_translated_preserves_shape_invariants() {
+        // A rigid shift preserves extents, volume, surface area,
+        // diagonal length, longest axis, and degeneracy — only the
+        // absolute position changes.
+        let bb = Bbox {
+            min: [-2.0, 0.0, 1.0],
+            max: [3.0, 4.0, 10.0],
+        };
+        let t = bb.translated([7.0, -3.0, 2.0]);
+        assert_eq!(t.extents(), bb.extents());
+        assert_eq!(t.volume(), bb.volume());
+        assert_eq!(t.surface_area(), bb.surface_area());
+        assert_eq!(t.diagonal_length(), bb.diagonal_length());
+        assert_eq!(t.longest_axis(), bb.longest_axis());
+        assert_eq!(t.is_degenerate(), bb.is_degenerate());
+    }
+
+    #[test]
+    fn bbox_translated_zero_delta_is_identity() {
+        let bb = Bbox {
+            min: [-1.0, -2.0, -3.0],
+            max: [4.0, 5.0, 6.0],
+        };
+        assert_eq!(bb.translated([0.0, 0.0, 0.0]), bb);
+    }
+
+    #[test]
+    fn bbox_translated_is_inverse_of_negated_delta() {
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 3.0, 4.0],
+        };
+        let d = [10.0_f32, -7.0, 0.25];
+        let neg = [-d[0], -d[1], -d[2]];
+        let round_trip = bb.translated(d).translated(neg);
+        assert_eq!(round_trip, bb);
+    }
+
+    #[test]
+    fn bbox_translated_centre_shifts_by_delta() {
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 4.0, 6.0],
+        };
+        let d = [5.0_f32, -1.0, 2.5];
+        let c0 = bb.centre();
+        let c1 = bb.translated(d).centre();
+        assert_eq!(c1, [c0[0] + d[0], c0[1] + d[1], c0[2] + d[2]]);
+    }
+
+    #[test]
+    fn bbox_translated_matches_from_points_on_translated_corners() {
+        // The corners-then-rebuild pattern from the `from_points` worked
+        // example produces the same box as `translated`, for any
+        // finite-vertex input. `translated` is just the cheap typed
+        // version of that reduction.
+        let bb = Bbox {
+            min: [-1.0, 2.0, -3.0],
+            max: [4.0, 5.0, 6.0],
+        };
+        let d = [10.0_f32, 20.0, 30.0];
+        let via_corners = Bbox::from_points(
+            bb.corners()
+                .into_iter()
+                .map(|c| [c[0] + d[0], c[1] + d[1], c[2] + d[2]]),
+        )
+        .unwrap();
+        assert_eq!(bb.translated(d), via_corners);
+    }
+
+    #[test]
+    fn bbox_translated_on_degenerate_point_stays_degenerate() {
+        // A point seed (min == max) is degenerate by construction; a
+        // translation moves the point but preserves degeneracy.
+        let bb = Bbox::point([1.0, 2.0, 3.0]);
+        assert!(bb.is_degenerate());
+        let t = bb.translated([10.0, 10.0, 10.0]);
+        assert_eq!(t.min, [11.0, 12.0, 13.0]);
+        assert_eq!(t.max, t.min);
+        assert!(t.is_degenerate());
     }
 
     #[test]

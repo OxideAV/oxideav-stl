@@ -429,6 +429,34 @@ fully-finite `p` is identical to `Bbox::point(p)`. Single
 allocation-free forward pass; `IntoIterator` lets `map`/`filter`
 chains feed straight in without an intermediate `Vec`.
 
+`Bbox::translated(delta)` is the typed pure-shift companion — adds
+`delta[axis]` to both `min[axis]` and `max[axis]` on every axis,
+preserving every shape invariant (extents, volume, surface area,
+diagonal length, longest axis, degeneracy). Equivalent to (but
+considerably cheaper than) the corner-rebuild pattern above:
+
+```rust
+use oxideav_stl::Bbox;
+
+let bb = Bbox { min: [0.0, 0.0, 0.0], max: [2.0, 3.0, 4.0] };
+let shift = [10.0_f32, 20.0, 30.0];
+
+// Typed pure-shift — single per-axis add on min + max.
+let t = bb.translated(shift);
+assert_eq!(t.min, [10.0, 20.0, 30.0]);
+assert_eq!(t.max, [12.0, 23.0, 34.0]);
+// Centre shifts by the same vector; extents are preserved.
+assert_eq!(t.extents(), bb.extents());
+```
+
+`translated([0.0; 3])` is the identity; `translated(-d).translated(d)`
+round-trips to the original box for any finite `d`. Pairs with
+`Bbox::contains_bbox` for slicer pre-flight "would this part still
+fit inside the build envelope after the shift?" queries, and with
+the `delta` field reported by `repair_translate_to_positive_octant`
+to reproduce the post-repair scene bbox without re-walking the
+geometry.
+
 `ValidationReport` carries a yes/no `is_clean()` predicate plus two
 quantitative summaries for tooling that wants to log or sort scenes
 by overall defect count:
