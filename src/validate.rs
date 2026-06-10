@@ -336,6 +336,60 @@ impl Bbox {
         }
     }
 
+    /// Box scaled about its own centre by a per-axis `factor` — each
+    /// extent is multiplied by `factor[axis]` while [`Self::centre`] is
+    /// held fixed. The companion to [`Self::translated`] (a rigid shift)
+    /// for the other in-place affine slicer pre-flight operation:
+    /// "resize this part by `f` in place — does the result still fit the
+    /// build envelope / clear the already-placed parts?" Pass the same
+    /// value on all three axes for a uniform resize
+    /// (`scaled_about_centre([1.1; 3])` → 110 % in every direction);
+    /// pass distinct values for an anisotropic stretch (e.g. shrink-
+    /// compensation that differs by axis).
+    ///
+    /// Because the centre is the pivot, the result is symmetric about the
+    /// original centre and `min`/`max` move outward (for `factor > 1`) or
+    /// inward (for `0 <= factor < 1`) by half the extent delta on each
+    /// axis. Distinct from [`Self::expanded_by`], which adds a fixed
+    /// absolute `margin` to every face regardless of extent;
+    /// `scaled_about_centre` is multiplicative, so a part twice as long on
+    /// one axis grows twice as much in absolute terms on that axis.
+    ///
+    /// A `factor` component of `1.0` leaves that axis untouched;
+    /// `scaled_about_centre([1.0; 3])` is the identity.
+    /// `scaled_about_centre([0.0; 3])` collapses the box to its centre
+    /// point (degenerate on every axis). A negative `factor` component
+    /// produces an inverted (`min > max`) box on that axis — the caller
+    /// owns re-normalising or re-checking [`Self::is_degenerate`] if a
+    /// mirrored resize is intended. Composition is multiplicative per
+    /// axis: `scaled_about_centre(a).scaled_about_centre(b)` equals
+    /// `scaled_about_centre([a[0] * b[0], a[1] * b[1], a[2] * b[2]])`
+    /// (within float rounding), and `scaled_about_centre(f)` followed by
+    /// the reciprocal `1.0 / f` round-trips to the original box for any
+    /// finite non-zero `f`.
+    ///
+    /// Non-finite `factor` components propagate through the
+    /// multiplication; finite inputs on a finite box are guaranteed to
+    /// produce finite outputs. The centre is preserved exactly only when
+    /// it is itself representable without rounding — the implementation
+    /// scales the half-extent about the exact `(min + max) * 0.5` centre,
+    /// so any drift is bounded by the centre's own rounding error and is
+    /// zero for the common case of integer-bounded boxes.
+    pub fn scaled_about_centre(&self, factor: [f32; 3]) -> Bbox {
+        let c = self.centre();
+        let mut out = Bbox {
+            min: [0.0; 3],
+            max: [0.0; 3],
+        };
+        for axis in 0..3 {
+            let half = (self.max[axis] - self.min[axis]) * 0.5;
+            let new_half = half * factor[axis];
+            out.min[axis] = c[axis] - new_half;
+            out.max[axis] = c[axis] + new_half;
+        }
+        out
+    }
+
     /// Whether two bounding boxes overlap on every axis (inclusive on
     /// every face — boxes that touch on exactly one face share that
     /// face and count as intersecting). Symmetric
@@ -1973,6 +2027,122 @@ mod tests {
         assert_eq!(t.min, [11.0, 12.0, 13.0]);
         assert_eq!(t.max, t.min);
         assert!(t.is_degenerate());
+    }
+
+    #[test]
+    fn bbox_scaled_about_centre_uniform_keeps_centre_doubles_extents() {
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 4.0, 6.0],
+        };
+        let c0 = bb.centre();
+        let s = bb.scaled_about_centre([2.0, 2.0, 2.0]);
+        // Centre is the pivot — unchanged.
+        assert_eq!(s.centre(), c0);
+        // Each extent doubled.
+        assert_eq!(s.extents(), [4.0, 8.0, 12.0]);
+        // Symmetric growth about the centre.
+        assert_eq!(s.min, [-1.0, -2.0, -3.0]);
+        assert_eq!(s.max, [3.0, 6.0, 9.0]);
+    }
+
+    #[test]
+    fn bbox_scaled_about_centre_identity_factor_is_noop() {
+        let bb = Bbox {
+            min: [-1.0, 2.0, -3.0],
+            max: [4.0, 5.0, 6.0],
+        };
+        assert_eq!(bb.scaled_about_centre([1.0, 1.0, 1.0]), bb);
+    }
+
+    #[test]
+    fn bbox_scaled_about_centre_anisotropic_per_axis() {
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        let s = bb.scaled_about_centre([0.5, 1.0, 3.0]);
+        // x halves, y untouched, z triples — all about centre [1,1,1].
+        assert_eq!(s.extents(), [1.0, 2.0, 6.0]);
+        assert_eq!(s.centre(), [1.0, 1.0, 1.0]);
+        assert_eq!(s.min, [0.5, 0.0, -2.0]);
+        assert_eq!(s.max, [1.5, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn bbox_scaled_about_centre_zero_factor_collapses_to_centre_point() {
+        let bb = Bbox {
+            min: [1.0, 2.0, 3.0],
+            max: [5.0, 8.0, 11.0],
+        };
+        let c = bb.centre();
+        let s = bb.scaled_about_centre([0.0, 0.0, 0.0]);
+        assert_eq!(s.min, c);
+        assert_eq!(s.max, c);
+        assert!(s.is_degenerate());
+    }
+
+    #[test]
+    fn bbox_scaled_about_centre_reciprocal_round_trips() {
+        let bb = Bbox {
+            min: [-2.0, 0.0, 1.0],
+            max: [6.0, 4.0, 9.0],
+        };
+        let f = [2.0_f32, 4.0, 0.5];
+        let recip = [1.0 / f[0], 1.0 / f[1], 1.0 / f[2]];
+        let round_trip = bb.scaled_about_centre(f).scaled_about_centre(recip);
+        // Half-extents and centre are exactly recoverable for these
+        // power-of-two-friendly factors on integer bounds.
+        assert_eq!(round_trip, bb);
+    }
+
+    #[test]
+    fn bbox_scaled_about_centre_composition_is_multiplicative() {
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [4.0, 4.0, 4.0],
+        };
+        let a = [2.0_f32, 0.5, 1.5];
+        let b = [1.5_f32, 4.0, 0.5];
+        let chained = bb.scaled_about_centre(a).scaled_about_centre(b);
+        let combined = bb.scaled_about_centre([a[0] * b[0], a[1] * b[1], a[2] * b[2]]);
+        assert_eq!(chained, combined);
+    }
+
+    #[test]
+    fn bbox_scaled_about_centre_negative_factor_inverts_axis() {
+        let bb = Bbox {
+            min: [0.0, 0.0, 0.0],
+            max: [2.0, 2.0, 2.0],
+        };
+        let s = bb.scaled_about_centre([-1.0, 1.0, 1.0]);
+        // Mirror on x about centre 1.0: min/max swap relative magnitudes.
+        assert_eq!(s.min[0], 2.0);
+        assert_eq!(s.max[0], 0.0);
+        // is_degenerate fires on the now-negative x extent.
+        assert!(s.is_degenerate());
+    }
+
+    #[test]
+    fn bbox_scaled_about_centre_matches_from_points_on_scaled_corners() {
+        // Scaling each corner about the centre and re-bounding reproduces
+        // `scaled_about_centre` — it is the cheap typed version of that
+        // corners-then-rebuild reduction.
+        let bb = Bbox {
+            min: [-1.0, 2.0, -3.0],
+            max: [4.0, 5.0, 6.0],
+        };
+        let f = [2.0_f32, 0.5, 3.0];
+        let c = bb.centre();
+        let via_corners = Bbox::from_points(bb.corners().into_iter().map(|p| {
+            [
+                c[0] + (p[0] - c[0]) * f[0],
+                c[1] + (p[1] - c[1]) * f[1],
+                c[2] + (p[2] - c[2]) * f[2],
+            ]
+        }))
+        .unwrap();
+        assert_eq!(bb.scaled_about_centre(f), via_corners);
     }
 
     #[test]

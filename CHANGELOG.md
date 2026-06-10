@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 273 — `Bbox::scaled_about_centre` per-axis in-place resize: each
+  extent is multiplied by `factor[axis]` while `Bbox::centre` is held
+  fixed. The multiplicative companion to `Bbox::translated` (a rigid
+  shift) for the other in-place affine slicer pre-flight operation —
+  "resize this part by `f` in place, does it still fit the build
+  envelope / clear the already-placed parts?" Uniform factor for a
+  proportional resize (`[1.1; 3]` → 110 %), distinct per-axis factors
+  for an anisotropic stretch (axis-dependent shrink-compensation).
+  Distinct from `expanded_by`, which adds a fixed *absolute* margin to
+  every face regardless of extent: `scaled_about_centre` is
+  multiplicative, so a part twice as long on an axis grows twice as much
+  in absolute terms there. `scaled_about_centre([1.0; 3])` is the
+  identity; `[0.0; 3]` collapses the box to its centre point (degenerate
+  on every axis); a negative component mirrors that axis into an
+  inverted (`min > max`) box for the caller to re-normalise. Composition
+  is multiplicative per axis
+  (`scaled_about_centre(a).scaled_about_centre(b)` ==
+  `scaled_about_centre([a*b]...)`) and the reciprocal `1.0 / f`
+  round-trips to the original box for any finite non-zero `f`. Scales
+  the half-extent about the exact `(min + max) * 0.5` centre so any
+  centre drift is bounded by the centre's own rounding error (zero for
+  integer-bounded boxes). Equivalent to — but considerably cheaper than
+  — scaling each `corners()` vertex about the centre and feeding the
+  result back through `from_points`. Non-finite `factor` components
+  propagate; finite inputs on a finite box stay finite.
+
 - Round 257 — `Bbox::from_points` reduction constructor: takes any
   `IntoIterator<Item = [f32; 3]>` and returns
   `Option<Bbox>` — the smallest axis-aligned hull that contains every
