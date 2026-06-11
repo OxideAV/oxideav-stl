@@ -996,6 +996,58 @@ recognition.
 The ASCII-vs-binary sniffer applies the same rule, so a file
 starting with `; …\nsolid …` classifies as ASCII end-to-end.
 
+## Strict-spec ASCII lint (pre-decode triage)
+
+`oxideav_stl::lint_ascii(bytes)` walks an ASCII STL byte slice with
+exactly the same grammar tolerance as the decoder — it succeeds iff
+`ascii::decode` succeeds — but returns a typed `AsciiLintReport`
+recording every place the file leans on a tolerance the strict 1989
+spec letter does not grant. The ASCII counterpart of
+`inspect_binary_header`, for pipelines that must emit (or demand)
+letter-strict files while still reading the tolerant real-world
+dialect. Six rules, each grounded in the spec's §6.5.2 prose:
+
+| Rule | Spec basis | Report field |
+| ---- | ---------- | ------------ |
+| Keyword case | "keywords … must appear in lower case" | `keyword_case_defects` (+ examples) |
+| Tab indentation | "Indentation must be with spaces; tabs are not allowed" | `tab_indented_lines` |
+| Vertex sign | "A facet normal coordinate may have a leading minus sign; a vertex coordinate may not" | `negative_vertex_coordinate_defects` (+ examples) |
+| Comment lines | spec defines no comment syntax | `comment_lines` |
+| Multi-`solid` | spec grammar describes one block per file | `extra_solid_blocks` |
+| Leading BOM | the format is ASCII | `leading_bom` |
+
+```rust
+use oxideav_stl::lint_ascii;
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let bytes: &[u8] = b"solid p\nfacet normal 0 0 1\nouter loop\nvertex 1 1 1\nvertex 2 1 1\nvertex 1 2 1\nendloop\nendfacet\nendsolid p\n";
+let rep = lint_ascii(bytes)?;
+if !rep.is_strict_spec() {
+    for (rule, count) in rep.findings_by_rule() {
+        if count > 0 {
+            eprintln!("{rule}: {count}");
+        }
+    }
+    for f in &rep.keyword_case_examples {
+        eprintln!("line {}: `{}` is not lower-case", f.line, f.token);
+    }
+}
+# Ok(())
+# }
+```
+
+Counts are always complete; the keyword-case and vertex-sign rules
+additionally carry capped (`MAX_REPORTED_LINT_FINDINGS` = 32)
+illustrative `AsciiLintFinding { line, token }` lists with 1-based
+line numbers and verbatim tokens. `is_strict_spec()` /
+`finding_total()` / `findings_by_rule()` mirror the validate module's
+report ergonomics. The vertex-sign rule is the lexical face of the
+geometric all-positive-octant rule: the crate's own ASCII encoder
+lints fully strict on positive-octant single-mesh scenes, and running
+`repair_translate_to_positive_octant` before re-emit clears the one
+geometry-driven finding. Normal coordinates are never flagged — the
+spec explicitly permits their leading minus.
+
 ## Trace tape (cross-impl audit)
 
 With the `trace` Cargo feature enabled and `OXIDEAV_STL_TRACE_FILE`

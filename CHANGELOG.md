@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 280 — `lint_ascii` strict-spec ASCII conformance lint (new
+  `lint` module): walks an ASCII STL byte slice with exactly the same
+  grammar tolerance as `ascii::decode` (acceptance parity by
+  construction — the lint succeeds iff the decoder succeeds) and
+  returns a typed `AsciiLintReport` recording every place the file
+  leans on a tolerance the strict 1989 spec letter does not grant.
+  The ASCII counterpart of `inspect_binary_header`: pre-decode triage
+  for pipelines that must emit (or demand) letter-strict files while
+  still reading the tolerant real-world dialect. Six rules, each
+  grounded in the staged transcription's §6.5.2 prose
+  (`docs/3d/stl/fabbers-stl-format.html`): keyword tokens not written
+  entirely in lower case ("Bold face indicates a keyword; these must
+  appear in lower case"); lines whose leading whitespace contains a
+  tab ("Indentation must be with spaces; tabs are not allowed");
+  `vertex` coordinate tokens with a lexical leading `-` ("A facet
+  normal coordinate may have a leading minus sign; a vertex
+  coordinate may not" — normal coordinates are never flagged);
+  `;`/`#` whole-line comments (the spec defines no comment syntax);
+  `solid` blocks beyond the first (the spec grammar describes one
+  block per file); and a leading UTF-8 BOM (a non-ASCII prefix).
+  Counts are always complete; the keyword-case and
+  negative-vertex-coordinate rules also carry capped
+  (`MAX_REPORTED_LINT_FINDINGS` = 32, matching
+  `validate::MAX_REPORTED_DEFECTS`) illustrative example lists of
+  `AsciiLintFinding { line, token }` with 1-based line numbers and
+  verbatim tokens. `is_strict_spec()` / `finding_total()` /
+  `findings_by_rule()` mirror the validate module's report
+  ergonomics (six stable string labels, sums exactly to the total).
+  The negative-vertex rule is the lexical face of the geometric
+  all-positive-octant rule: the crate's own ASCII encoder lints
+  fully strict on positive-octant geometry, and pairing with
+  `repair_translate_to_positive_octant` before re-emit clears the
+  one geometry-driven finding (covered by an integration test).
+  10 new integration tests (`tests/ascii_lint.rs`) + 5 unit tests,
+  including a 14-case accept/reject acceptance-parity corpus
+  against `ascii::decode`.
+
 - Round 273 — `Bbox::scaled_about_centre` per-axis in-place resize: each
   extent is multiplied by `factor[axis]` while `Bbox::centre` is held
   fixed. The multiplicative companion to `Bbox::translated` (a rigid
