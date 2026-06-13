@@ -14,8 +14,11 @@ name: Fuzz
 # submodule, and the format is simple enough that there's no
 # canonical "what should this byte sequence mean" answer beyond the
 # 3D Systems spec. Decode panic-freedom + self-roundtrip is the
-# contract; the 30-minute budget is split across the two targets by
-# the reusable workflow.
+# contract; a third `triage` target adds panic-freedom over the three
+# pre-decode inspectors (`lint_ascii`, `inspect_binary_header`,
+# `detect_color_convention`), each of which hand-rolls its own byte
+# scanner outside the decoder path. The 30-minute budget is split
+# across the three targets by the reusable workflow.
 
 on:
   schedule:

@@ -1063,7 +1063,7 @@ against that schema without reading source.
 
 ## Fuzzing
 
-`fuzz/` carries two cargo-fuzz targets driven by a daily GitHub
+`fuzz/` carries three cargo-fuzz targets driven by a daily GitHub
 Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
 
 - `decode` — feeds arbitrary attacker-controlled bytes through
@@ -1080,9 +1080,24 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
   signature). Mirrors the
   `binary_cube_triangle_records_roundtrip_byte_identical` integration
   test as a coverage-guided invariant.
+- `triage` — drives the three pre-decode inspectors on arbitrary
+  bytes: `lint_ascii` (strict-1989-spec ASCII conformance walk),
+  `inspect_binary_header` (header + per-face attribute-slot walk with
+  no `count * 50` pre-allocation), and `detect_color_convention`
+  (VisCAM / Materialise 15-bit-RGB classification of an attribute-byte
+  buffer). Each inspector hand-rolls its **own** byte scanner — none
+  route through `StlDecoder` — so this target covers parser surfaces
+  the other two never touch: the lint token loop + tab/sign/BOM scan +
+  `MAX_REPORTED_LINT_FINDINGS` example cap, the inspector's
+  hostile-count `min` cap + `triangle_count == 0` NaN-fraction branch,
+  and the colour detector's `chunks_exact(2)` dangling-byte remainder.
+  Panic-freedom is the whole invariant. A 60-second local sweep
+  (≈14.8 M executions) found zero crashes; the corpus is checked in
+  minimised to 363 coverage-preserving seeds.
 
 Run locally with `cargo +nightly fuzz run decode` /
-`cargo +nightly fuzz run roundtrip` from `crates/oxideav-stl/`.
+`cargo +nightly fuzz run roundtrip` / `cargo +nightly fuzz run
+triage` from `crates/oxideav-stl/`.
 
 ## Benchmarks
 

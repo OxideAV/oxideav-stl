@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 289 — third cargo-fuzz target `triage` (`fuzz/fuzz_targets/
+  triage.rs`). The existing `decode` / `roundtrip` targets only drive
+  `StlDecoder::decode`, but the three public pre-decode inspectors —
+  `lint_ascii`, `inspect_binary_header`, and `detect_color_convention`
+  — each hand-roll their own byte scanner and never route through the
+  decoder, so they were an untested malformed-input surface. The new
+  target feeds arbitrary attacker-controlled bytes through all three
+  and asserts each call returns rather than panicking / indexing past
+  the slice / dividing by a live zero, hitting the lint token loop +
+  tab/sign/BOM scan + `MAX_REPORTED_LINT_FINDINGS` example cap, the
+  inspector's hostile-`u32`-count `min` cap + `triangle_count == 0`
+  NaN-fraction branch, and the colour detector's `chunks_exact(2)`
+  dangling-byte remainder. A 60-second local sweep (≈14.8 M
+  executions) found zero crashes; the checked-in corpus is minimised
+  to 363 coverage-preserving seeds. Scheduled automatically by the
+  daily `.github/workflows/fuzz.yml` reusable harness (now splitting
+  its 1800-second budget across three targets). No `src/` change — the
+  inspectors were already panic-free; this hardens the contract with
+  coverage-guided assurance.
+
 - Round 280 — `lint_ascii` strict-spec ASCII conformance lint (new
   `lint` module): walks an ASCII STL byte slice with exactly the same
   grammar tolerance as `ascii::decode` (acceptance parity by
