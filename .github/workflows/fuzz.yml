@@ -17,8 +17,11 @@ name: Fuzz
 # contract; a third `triage` target adds panic-freedom over the three
 # pre-decode inspectors (`lint_ascii`, `inspect_binary_header`,
 # `detect_color_convention`), each of which hand-rolls its own byte
-# scanner outside the decoder path. The 30-minute budget is split
-# across the three targets by the reusable workflow.
+# scanner outside the decoder path. A fourth `repair` target builds a
+# hostile `Scene3D` directly from fuzz bytes (no decode step) and drives
+# the `validate` + `topology` repair surface — the geometric-analysis
+# passes the byte-parsing targets never reach. The 30-minute budget is
+# split across the four targets by the reusable workflow.
 
 on:
   schedule:

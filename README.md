@@ -1063,7 +1063,7 @@ against that schema without reading source.
 
 ## Fuzzing
 
-`fuzz/` carries three cargo-fuzz targets driven by a daily GitHub
+`fuzz/` carries four cargo-fuzz targets driven by a daily GitHub
 Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
 
 - `decode` — feeds arbitrary attacker-controlled bytes through
@@ -1094,10 +1094,27 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
   Panic-freedom is the whole invariant. A 60-second local sweep
   (≈14.8 M executions) found zero crashes; the corpus is checked in
   minimised to 363 coverage-preserving seeds.
+- `repair` — builds a hostile `Scene3D` **directly** from fuzz bytes
+  (no decode step) — multiple meshes, multiple primitives, every
+  `Topology` variant, indexed and unindexed primitives, `U16` / `U32`
+  index buffers with deliberately out-of-range entries, `normals`
+  arrays whose length disagrees with `positions`, and coordinate
+  bit-patterns that decode to NaN / ±Inf / subnormal — then drives the
+  `validate` + `topology` (repair) surface that the byte-parsing
+  targets never reach: `validate` with every rule on (including the
+  opt-in `check_t_junctions` / `check_positive_octant` brute-force
+  scans), `bbox` / `bbox_of_mesh` / `bbox_of_primitive`, `shells`, and
+  every mutating repair pass — individually on per-pass clones and as
+  the full documented nine-step pipeline on one scene, re-validated at
+  the end. Each pass takes a caller-controlled scene and must return
+  its report rather than panic / index past a buffer / overflow on a
+  bad index / divide by zero. A 60-second local sweep (≈480 K
+  executions) found zero crashes; the corpus is checked in minimised
+  to coverage-preserving seeds.
 
 Run locally with `cargo +nightly fuzz run decode` /
 `cargo +nightly fuzz run roundtrip` / `cargo +nightly fuzz run
-triage` from `crates/oxideav-stl/`.
+triage` / `cargo +nightly fuzz run repair` from `crates/oxideav-stl/`.
 
 ## Benchmarks
 
