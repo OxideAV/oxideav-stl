@@ -1005,7 +1005,7 @@ recording every place the file leans on a tolerance the strict 1989
 spec letter does not grant. The ASCII counterpart of
 `inspect_binary_header`, for pipelines that must emit (or demand)
 letter-strict files while still reading the tolerant real-world
-dialect. Six rules, each grounded in the spec's §6.5.2 prose:
+dialect. Seven rules, each grounded in the spec's §6.5.2 prose:
 
 | Rule | Spec basis | Report field |
 | ---- | ---------- | ------------ |
@@ -1015,6 +1015,7 @@ dialect. Six rules, each grounded in the spec's §6.5.2 prose:
 | Comment lines | spec defines no comment syntax | `comment_lines` |
 | Multi-`solid` | spec grammar describes one block per file | `extra_solid_blocks` |
 | Leading BOM | the format is ASCII | `leading_bom` |
+| Empty `solid` | grammar repeats the facet body with `{…}`+ (one or more) | `empty_solid_blocks` |
 
 ```rust
 use oxideav_stl::lint_ascii;

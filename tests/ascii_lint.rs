@@ -115,6 +115,7 @@ fn findings_by_rule_sums_to_total_with_stable_labels() {
             "comment_line",
             "extra_solid_block",
             "leading_bom",
+            "empty_solid_block",
         ]
     );
     let sum: usize = by_rule.iter().map(|(_, c)| c).sum();
@@ -144,6 +145,44 @@ fn example_lists_cap_but_counts_stay_complete() {
         MAX_REPORTED_LINT_FINDINGS
     );
     assert_eq!(rep.triangles_walked, 40);
+}
+
+#[test]
+fn empty_solid_block_is_a_finding_but_still_decodes() {
+    // Spec ASCII grammar repeats the facet body with `{…}`+ (one or
+    // more); a facet-less block violates the strict letter even though
+    // the decoder accepts it and yields an empty mesh.
+    let empty = b"solid hollow\nendsolid hollow\n";
+    let rep = lint_ascii(empty).unwrap();
+    assert_eq!(rep.empty_solid_blocks, 1);
+    assert_eq!(rep.triangles_walked, 0);
+    assert_eq!(rep.solid_blocks, 1);
+    assert_eq!(rep.extra_solid_blocks, 0);
+    assert_eq!(rep.finding_total(), 1);
+    assert!(!rep.is_strict_spec());
+    // The decoder accepts the same bytes — lint is diagnostic only.
+    oxideav_stl::ascii::decode(empty).unwrap();
+
+    // A second empty block also counts as an extra-solid-block (rule 5),
+    // so the two rules are independent and add cleanly.
+    let two_empty = b"solid a\nendsolid a\nsolid b\nendsolid b\n";
+    let rep = lint_ascii(two_empty).unwrap();
+    assert_eq!(rep.empty_solid_blocks, 2);
+    assert_eq!(rep.extra_solid_blocks, 1);
+    assert_eq!(rep.solid_blocks, 2);
+    assert_eq!(rep.finding_total(), 3);
+}
+
+#[test]
+fn one_empty_one_populated_block_counts_only_the_empty_one() {
+    let mixed = format!("{STRICT}solid empty\nendsolid empty\n");
+    let rep = lint_ascii(mixed.as_bytes()).unwrap();
+    assert_eq!(rep.empty_solid_blocks, 1);
+    assert_eq!(rep.triangles_walked, 1);
+    assert_eq!(rep.solid_blocks, 2);
+    assert_eq!(rep.extra_solid_blocks, 1);
+    // rule 5 (extra block) + rule 7 (empty block) = 2 findings.
+    assert_eq!(rep.finding_total(), 2);
 }
 
 /// Acceptance parity: on a corpus of accept/reject inputs, `lint_ascii`

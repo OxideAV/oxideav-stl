@@ -44,6 +44,12 @@
 //!    is a non-ASCII prefix some text editors prepend. The decoder
 //!    strips it; the lint records it on
 //!    [`AsciiLintReport::leading_bom`].
+//! 7. **Empty `solid` block** — the spec's ASCII grammar repeats the
+//!    facet body with the `{…}`<sup>+</sup> notation, where the `+`
+//!    means "one or more times". A `solid … endsolid` block carrying
+//!    *zero* facets therefore violates the strict grammar even though
+//!    the decoder accepts it (and yields an empty mesh). Each such
+//!    block is counted under [`AsciiLintReport::empty_solid_blocks`].
 //!
 //! A report with [`AsciiLintReport::is_strict_spec`] `== true`
 //! certifies the input uses none of the six tolerances. The crate's
@@ -104,6 +110,11 @@ pub struct AsciiLintReport {
     /// Whether the input started with a UTF-8 byte-order mark
     /// (rule 6).
     pub leading_bom: bool,
+    /// `solid … endsolid` blocks carrying zero facets (rule 7). The
+    /// spec's `{…}`<sup>+</sup> grammar requires at least one facet
+    /// per block; the decoder still accepts an empty block (yielding
+    /// an empty mesh), but it is not strict-spec.
+    pub empty_solid_blocks: usize,
 }
 
 impl AsciiLintReport {
@@ -125,11 +136,12 @@ impl AsciiLintReport {
             + self.comment_lines
             + self.extra_solid_blocks
             + usize::from(self.leading_bom)
+            + self.empty_solid_blocks
     }
 
-    /// Labeled per-rule breakdown — six stable string keys safe to
+    /// Labeled per-rule breakdown — seven stable string keys safe to
     /// use as metric names. Sums exactly to [`Self::finding_total`].
-    pub fn findings_by_rule(&self) -> [(&'static str, usize); 6] {
+    pub fn findings_by_rule(&self) -> [(&'static str, usize); 7] {
         [
             ("keyword_case", self.keyword_case_defects),
             ("tab_indentation", self.tab_indented_lines),
@@ -140,6 +152,7 @@ impl AsciiLintReport {
             ("comment_line", self.comment_lines),
             ("extra_solid_block", self.extra_solid_blocks),
             ("leading_bom", usize::from(self.leading_bom)),
+            ("empty_solid_block", self.empty_solid_blocks),
         ]
     }
 }
@@ -207,6 +220,7 @@ pub fn lint_ascii(bytes: &[u8]) -> Result<AsciiLintReport> {
         w.expect_keyword("solid")?;
         w.skip_line_remainder();
 
+        let mut facets_in_block = 0usize;
         loop {
             w.skip_ws();
             if w.peek_keyword_eq("endsolid") {
@@ -233,8 +247,15 @@ pub fn lint_ascii(bytes: &[u8]) -> Result<AsciiLintReport> {
             w.expect_keyword("endloop")?;
             w.expect_keyword("endfacet")?;
             w.report.triangles_walked += 1;
+            facets_in_block += 1;
         }
         w.report.solid_blocks += 1;
+        // Rule 7: the spec grammar's `{…}`+ requires at least one
+        // facet per block. An empty `solid … endsolid` is accepted by
+        // the decoder (empty mesh) but not strict-spec.
+        if facets_in_block == 0 {
+            w.report.empty_solid_blocks += 1;
+        }
     }
 
     if report.solid_blocks == 0 {
@@ -445,5 +466,17 @@ mod tests {
         assert!(lint_ascii(b"").is_err());
         assert!(lint_ascii(b"solid x\n facet garbage\nendsolid x\n").is_err());
         assert!(lint_ascii(b"not an stl at all").is_err());
+    }
+
+    #[test]
+    fn empty_solid_block_is_flagged() {
+        // The decoder accepts a facet-less block (yielding an empty
+        // mesh); the strict-spec lint flags it under rule 7.
+        let rep = lint_ascii(b"solid x\nendsolid x\n").unwrap();
+        assert_eq!(rep.empty_solid_blocks, 1);
+        assert_eq!(rep.triangles_walked, 0);
+        assert_eq!(rep.solid_blocks, 1);
+        assert!(!rep.is_strict_spec());
+        assert_eq!(rep.finding_total(), 1);
     }
 }

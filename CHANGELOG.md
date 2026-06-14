@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 304 — seventh strict-spec ASCII lint rule: empty-`solid`-block
+  detection. The spec's ASCII grammar repeats the facet body with the
+  `{…}`+ notation, where the `+` means "one or more times", so a
+  `solid … endsolid` block carrying zero facets violates the strict
+  letter even though `ascii::decode` accepts it (yielding an empty
+  mesh). `lint_ascii` now counts each such block under
+  `AsciiLintReport::empty_solid_blocks`; the count folds into
+  `finding_total()` / `is_strict_spec()` and adds a stable
+  `"empty_solid_block"` key to `findings_by_rule()` (now 7 entries).
+  Independent of the multi-`solid` rule (rule 5), so two empty blocks
+  contribute one extra-block finding plus two empty-block findings.
+  Spec basis: `docs/3d/stl/fabbers-stl-format.html` §6.5.2 ASCII
+  grammar `{…}`+ repetition notation.
+
 - Round 289 — third cargo-fuzz target `triage` (`fuzz/fuzz_targets/
   triage.rs`). The existing `decode` / `roundtrip` targets only drive
   `StlDecoder::decode`, but the three public pre-decode inspectors —
