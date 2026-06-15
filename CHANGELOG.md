@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-stl/compare/v0.0.3...v0.0.4) - 2026-06-15
+
+### Other
+
+- add check_z_sorted non-mutating ascending-z diagnostic
+- Round 304 — lint_ascii rule 7: empty-solid-block strict-spec detection
+- add `repair` target driving the validate + topology repair surface
+- add `triage` target hardening the three pre-decode inspectors
+- Round 280 — lint_ascii strict-spec ASCII conformance lint
+- Round 273 — Bbox::scaled_about_centre per-axis in-place resize
+- Round 266 — Bbox::translated pure-shift typed helper
+- Round 257 — Bbox::from_points reduction constructor
+- drop release-plz.toml — use release-plz defaults across the workspace
+- Round 245 — check_zero_area_triangles validation rule
+- Round 242 — check_degenerate_triangles validation rule
+- Round 239 — Bbox::corners() canonical eight-vertex AABB enumeration
+- Round 236 — inspect_binary_header: typed pre-decode header triage
+- Round 231 — Bbox::intersects + Bbox::intersect + Bbox::contains_bbox AABB-lattice methods
+- Round 225 — Bbox::point + Bbox::merge + Bbox::expanded_by composition helpers
+- Round 219 — Bbox geometry accessors + per-mesh / per-primitive bbox
+- Round 216 — ValidationReport::defect_total + defects_by_rule accessors
+- Round 210 — repair_split_t_junctions (spec vertex-to-vertex fix-up)
+- Round 205 — repair_make_winding_consistent (spec mesh-wide winding fix-up)
+- Round 199 — repair_translate_to_positive_octant (spec all-positive-octant fix-up)
+
 ### Added
 
 - Round 311 — `check_z_sorted(scene) -> ZSortReport`: non-mutating
