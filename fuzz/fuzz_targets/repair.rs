@@ -35,7 +35,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_mesh3d::{Indices, Mesh, Node, Primitive, Scene3D, Topology};
 use oxideav_stl::{
-    bbox, bbox_of_mesh, bbox_of_primitive, repair_drop_degenerate_triangles,
+    bbox, bbox_of_mesh, bbox_of_primitive, boundary_loops, repair_drop_degenerate_triangles,
     repair_make_winding_consistent, repair_normalize_unit_normals,
     repair_orient_normals_from_winding, repair_recompute_zero_normals, repair_sort_triangles_by_z,
     repair_split_t_junctions, repair_translate_to_positive_octant, repair_weld_vertices, shells,
@@ -210,6 +210,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let _ = shells(&scene);
+    let _ = boundary_loops(&scene);
 
     // --- mutating repair surface ---
     // Each pass runs on its own clone so a pass that rewrites the index

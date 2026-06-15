@@ -609,6 +609,47 @@ geometry. Vertex equality uses bit-exact `f32` matching; corners
 that differ by floating-point noise should be pre-deduplicated via
 `StlEncoder::unique_vertices_with_tolerance_spatial`.
 
+### Boundary-loop extraction (naked-edge holes)
+
+`oxideav_stl::boundary_loops(&scene)` is the non-mutating companion to
+the watertight diagnostic. `Shell::boundary_edges` and the validate
+module's `boundary_edges` field only *count* edges used by exactly one
+triangle; `boundary_loops` chains those naked edges into the ordered
+cycles they form — each cycle is a hole in the surface that a slicer /
+mesh-repair pipeline can cap by triangulating the loop:
+
+```rust
+use oxideav_stl::boundary_loops;
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+for lp in boundary_loops(&scene) {
+    if lp.closed {
+        eprintln!("hole with {} boundary edges", lp.edge_count());
+        // `lp.vertices` traces the loop in winding order; a cap
+        // triangle fan rooted at `lp.vertices[0]` stays consistent
+        // with the surrounding surface.
+    } else {
+        eprintln!("non-manifold open boundary chain ({} edges)", lp.edge_count());
+    }
+}
+```
+
+Each triangle contributes three **directed** edges in winding order;
+the single directed instance of a boundary edge carries the surface's
+orientation, so a loop walked tail-to-head keeps the surface on one
+side — exactly the winding a cap triangle needs. For a closed loop the
+first vertex is *not* repeated at the end (the closing edge is implied),
+so `vertices.len() == edge_count()`; an open chain (a non-manifold
+boundary where three-plus boundary edges meet at a point, e.g. a
+bowtie) is emitted with `closed == false` rather than guessing, and
+`edge_count() == vertices.len() - 1`. Every boundary edge appears in
+exactly one returned loop, so the sum of `edge_count()` across all
+loops equals the scene's total boundary-edge count. Loops are returned
+sorted by their lexicographically-smallest vertex so the output is
+stable across runs regardless of triangle-iteration order. A watertight
+scene returns an empty vec. Vertex equality is bit-exact `f32` matching
+(weld floating-point-noise corners via `repair_weld_vertices` first).
+
 `repair_weld_vertices` only mutates `prim.positions` /
 `prim.normals` / `prim.indices` on `Triangles` primitives;
 `prim.extras`, `mesh.name`, and the scene-graph `nodes` / `roots`

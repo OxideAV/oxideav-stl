@@ -276,6 +276,178 @@ pub fn shells(scene: &Scene3D) -> Vec<Shell> {
     shells
 }
 
+/// One boundary (a.k.a. "naked-edge") loop extracted by
+/// [`boundary_loops`].
+///
+/// A *boundary edge* is an undirected edge used by exactly one
+/// triangle — the same population [`Shell::boundary_edges`] and the
+/// validate module's `boundary_edges` field merely *count*. This
+/// struct goes one step further and chains those edges into the
+/// ordered cycles they form, which is what a slicer / mesh-repair
+/// pipeline actually needs: each loop is a hole in the surface that
+/// can be capped by triangulating the loop, and the loop's vertex
+/// order tells the consumer which winding a cap triangle must use to
+/// stay consistent with the surrounding surface.
+///
+/// The 1989 spec says each facet "is part of the boundary between the
+/// interior and the exterior of the object" — i.e. a valid STL solid
+/// is *closed*, with no boundary edges at all. When that invariant is
+/// broken, this report localises the breakage as discrete holes
+/// rather than an undifferentiated edge count.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundaryLoop {
+    /// Ordered vertex positions tracing the loop. For a closed loop the
+    /// first vertex is **not** repeated at the end; the implied final
+    /// edge runs from the last entry back to the first. Length equals
+    /// the number of edges in the loop (each entry is the tail of one
+    /// directed boundary edge).
+    pub vertices: Vec<[f32; 3]>,
+    /// Whether the chain closed back on its starting vertex. A
+    /// well-formed manifold-with-boundary surface yields only closed
+    /// loops; an `open` loop signals a non-manifold boundary
+    /// (a vertex where three or more boundary edges meet) that could
+    /// not be walked into a single cycle and was emitted as an open
+    /// chain so no edge is silently dropped.
+    pub closed: bool,
+}
+
+impl BoundaryLoop {
+    /// Number of boundary edges in this loop. For a closed loop this
+    /// equals `vertices.len()` (the implied closing edge included); for
+    /// an open chain it is `vertices.len() - 1` (no closing edge).
+    pub fn edge_count(&self) -> usize {
+        if self.closed {
+            self.vertices.len()
+        } else {
+            self.vertices.len().saturating_sub(1)
+        }
+    }
+}
+
+/// Extract the ordered boundary loops of `scene` — the cycles formed
+/// by every edge used by exactly one triangle.
+///
+/// Each triangle contributes three **directed** edges in winding
+/// order (`a→b`, `b→c`, `c→a`). An undirected edge whose total use
+/// count (over both directions) is exactly one is a boundary edge;
+/// its single directed instance carries the surface's orientation, so
+/// a boundary loop walked tail-to-head keeps the surface consistently
+/// on one side — exactly the winding a cap triangle needs.
+///
+/// Loops are reconstructed by following each boundary edge's head to
+/// the unique boundary edge whose tail matches. When a boundary
+/// vertex has more than one outgoing boundary edge (a non-manifold
+/// boundary: three-plus boundary edges meeting at a point), the walk
+/// consumes outgoing edges in a deterministic order and emits the
+/// resulting chain with `closed = false` rather than guessing — every
+/// boundary edge appears in exactly one returned loop, so the total
+/// edge count across all loops equals the scene's boundary-edge count.
+///
+/// Loops are returned sorted by their lexicographically-smallest
+/// vertex key so the output is stable across runs regardless of
+/// triangle-iteration order. Returns an empty vec for a watertight
+/// scene (no boundary edges), an empty scene, or one whose primitives
+/// are all non-`Triangles`.
+pub fn boundary_loops(scene: &Scene3D) -> Vec<BoundaryLoop> {
+    let tris = collect_triangles(scene);
+    if tris.is_empty() {
+        return Vec::new();
+    }
+
+    // Count undirected edge uses (both directions collapse to the
+    // canonical (lo, hi) key) and record each directed instance.
+    let mut undirected_uses: HashMap<(VertKey, VertKey), usize> = HashMap::new();
+    let mut directed: Vec<(VertKey, VertKey)> = Vec::new();
+    for tri in &tris {
+        let pairs = [
+            (tri.keys[0], tri.keys[1]),
+            (tri.keys[1], tri.keys[2]),
+            (tri.keys[2], tri.keys[0]),
+        ];
+        for (a, b) in pairs {
+            let key = if a <= b { (a, b) } else { (b, a) };
+            *undirected_uses.entry(key).or_insert(0) += 1;
+            directed.push((a, b));
+        }
+    }
+
+    // Adjacency from tail -> list of heads, restricted to boundary
+    // edges (undirected use count == 1). A directed edge is kept only
+    // if its undirected key is used exactly once across the whole
+    // scene.
+    let mut out_edges: HashMap<VertKey, Vec<VertKey>> = HashMap::new();
+    let mut remaining = 0usize;
+    for (a, b) in directed {
+        let key = if a <= b { (a, b) } else { (b, a) };
+        if undirected_uses.get(&key) == Some(&1) {
+            out_edges.entry(a).or_default().push(b);
+            remaining += 1;
+        }
+    }
+    if remaining == 0 {
+        return Vec::new();
+    }
+
+    // Deterministic consumption order: sort each adjacency list so
+    // repeated runs walk the same way, then pop from the end.
+    for heads in out_edges.values_mut() {
+        heads.sort_unstable();
+        heads.reverse();
+    }
+
+    // Seed the walk from boundary-edge tails in sorted order so loop
+    // output is stable.
+    let mut tails: Vec<VertKey> = out_edges.keys().copied().collect();
+    tails.sort_unstable();
+
+    let mut loops: Vec<BoundaryLoop> = Vec::new();
+    for &seed in &tails {
+        // A seed may have multiple outgoing edges (non-manifold
+        // boundary vertex); start a fresh walk for each one still
+        // available.
+        while out_edges.get(&seed).is_some_and(|v| !v.is_empty()) {
+            let mut chain: Vec<VertKey> = vec![seed];
+            let mut cur = seed;
+            let mut closed = false;
+            while let Some(next) = out_edges.get_mut(&cur).and_then(|v| v.pop()) {
+                if next == seed {
+                    // Closed the loop back on the start vertex; the
+                    // closing edge is implied, do not push `seed`
+                    // again.
+                    closed = true;
+                    break;
+                }
+                chain.push(next);
+                cur = next;
+            }
+            loops.push(BoundaryLoop {
+                vertices: chain.iter().map(|k| key_to_pos(*k)).collect(),
+                closed,
+            });
+        }
+    }
+
+    // Stable order: by the loop's lexicographically-smallest vertex
+    // key (recovered from the emitted positions' bit patterns).
+    loops.sort_by_key(|lp| {
+        lp.vertices
+            .iter()
+            .map(|p| VertKey::from(*p))
+            .min()
+            .unwrap_or(VertKey(0, 0, 0))
+    });
+    loops
+}
+
+/// Recover the exact `[f32; 3]` position from a bit-pattern key.
+fn key_to_pos(k: VertKey) -> [f32; 3] {
+    [
+        f32::from_bits(k.0),
+        f32::from_bits(k.1),
+        f32::from_bits(k.2),
+    ]
+}
+
 /// Outcome of a [`repair_weld_vertices`] pass.
 ///
 /// Counters are summed across every `Triangles` primitive in the
@@ -4482,5 +4654,131 @@ mod tests {
             Some(true),
         );
         assert_eq!(scene.meshes[0].name.as_deref(), Some("widget"));
+    }
+
+    // -- boundary_loops -------------------------------------------------
+
+    #[test]
+    fn boundary_loops_empty_scene() {
+        assert!(boundary_loops(&Scene3D::new()).is_empty());
+    }
+
+    #[test]
+    fn boundary_loops_watertight_cube_has_none() {
+        // A closed cube has every edge shared by exactly two
+        // triangles — zero boundary edges, zero loops.
+        let scene = scene_with_primitives(vec![unit_cube_soup_primitive()]);
+        assert_eq!(shells(&scene)[0].boundary_edges, 0);
+        assert!(boundary_loops(&scene).is_empty());
+    }
+
+    #[test]
+    fn boundary_loops_single_triangle_one_closed_loop() {
+        // A lone triangle is all boundary: its three edges form one
+        // closed loop walking the winding.
+        let prim = one_triangle([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        let scene = scene_with_primitives(vec![prim]);
+        let loops = boundary_loops(&scene);
+        assert_eq!(loops.len(), 1);
+        assert!(loops[0].closed);
+        assert_eq!(loops[0].edge_count(), 3);
+        assert_eq!(loops[0].vertices.len(), 3);
+        // The three corner positions all appear exactly once.
+        let mut got: Vec<[f32; 3]> = loops[0].vertices.clone();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut want = vec![[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]];
+        want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn boundary_loops_walk_is_chained_in_winding_order() {
+        // Two triangles sharing edge (1,0,0)-(0,1,0) form a quad whose
+        // outer boundary is a single 4-edge loop. Verify the chain is
+        // an actual cycle and the interior diagonal is never a loop edge.
+        let mut prim = Primitive::new(Topology::Triangles);
+        // tri A: (0,0,0)->(1,0,0)->(0,1,0)
+        prim.positions
+            .extend_from_slice(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        // tri B: (1,0,0)->(1,1,0)->(0,1,0) — shares edge (1,0,0)-(0,1,0)
+        prim.positions
+            .extend_from_slice(&[[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]]);
+        let scene = scene_with_primitives(vec![prim]);
+
+        let loops = boundary_loops(&scene);
+        assert_eq!(loops.len(), 1, "the quad has one outer boundary loop");
+        let lp = &loops[0];
+        assert!(lp.closed);
+        // 4 distinct corner positions, the shared diagonal is interior.
+        assert_eq!(lp.edge_count(), 4);
+        assert_eq!(lp.vertices.len(), 4);
+        let mut uniq: Vec<[f32; 3]> = lp.vertices.clone();
+        uniq.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        uniq.dedup();
+        assert_eq!(uniq.len(), 4, "no vertex repeats in the loop");
+        // The diagonal edge (1,0,0)-(0,1,0) is NOT a boundary edge, so
+        // consecutive loop vertices are never that pair.
+        let n = lp.vertices.len();
+        for i in 0..n {
+            let a = lp.vertices[i];
+            let b = lp.vertices[(i + 1) % n];
+            let is_diag = (a == [1.0, 0.0, 0.0] && b == [0.0, 1.0, 0.0])
+                || (a == [0.0, 1.0, 0.0] && b == [1.0, 0.0, 0.0]);
+            assert!(!is_diag, "interior diagonal must not be a loop edge");
+        }
+    }
+
+    #[test]
+    fn boundary_loops_total_edge_count_matches_shell_boundary_count() {
+        // Two disjoint triangles → two separate closed loops, and the
+        // sum of their edge counts equals the total boundary-edge count.
+        let a = one_triangle([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        let b = one_triangle([[5.0, 5.0, 0.0], [6.0, 5.0, 0.0], [5.0, 6.0, 0.0]]);
+        let scene = scene_with_primitives(vec![a, b]);
+
+        let total_boundary: usize = shells(&scene).iter().map(|s| s.boundary_edges).sum();
+        let loops = boundary_loops(&scene);
+        let loop_edges: usize = loops.iter().map(|l| l.edge_count()).sum();
+        assert_eq!(loop_edges, total_boundary);
+        assert_eq!(loops.len(), 2);
+        assert!(loops.iter().all(|l| l.closed && l.edge_count() == 3));
+    }
+
+    #[test]
+    fn boundary_loops_stable_across_runs() {
+        let prim = unit_cube_soup_primitive();
+        // Drop one face to open a triangular hole.
+        let mut prim2 = Primitive::new(Topology::Triangles);
+        prim2
+            .positions
+            .extend_from_slice(&prim.positions[..33.min(prim.positions.len())]);
+        let scene = scene_with_primitives(vec![prim2]);
+        let r1 = boundary_loops(&scene);
+        let r2 = boundary_loops(&scene);
+        assert_eq!(r1, r2, "boundary_loops output is deterministic");
+        assert!(!r1.is_empty());
+    }
+
+    #[test]
+    fn boundary_loops_accounts_for_every_edge_on_non_manifold_boundary() {
+        // A "bowtie": two triangles meeting at a single shared corner
+        // (no shared edge). Every edge is a boundary edge; the shared
+        // corner has multiple outgoing boundary edges — but every
+        // boundary edge must still be accounted for exactly once.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions
+            .extend_from_slice(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1.0, 0.0]]);
+        prim.positions
+            .extend_from_slice(&[[0.5, 1.0, 0.0], [1.5, 2.0, 0.0], [-0.5, 2.0, 0.0]]);
+        let scene = scene_with_primitives(vec![prim]);
+
+        let total_boundary: usize = shells(&scene).iter().map(|s| s.boundary_edges).sum();
+        let loops = boundary_loops(&scene);
+        let loop_edges: usize = loops.iter().map(|l| l.edge_count()).sum();
+        assert_eq!(
+            loop_edges, total_boundary,
+            "every boundary edge appears in exactly one loop"
+        );
+        assert!(!loops.is_empty());
     }
 }

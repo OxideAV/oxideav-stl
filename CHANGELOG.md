@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `topology::boundary_loops` — non-mutating extraction of ordered
+  naked-edge (boundary) loops. Where `Shell::boundary_edges` and the
+  validate module merely *count* edges used by a single triangle, this
+  chains them into the ordered cycles they form (each a hole in the
+  surface), carrying the winding-consistent vertex order a cap triangle
+  needs plus an `open`/`closed` flag for non-manifold boundaries. The
+  total edge count across all loops equals the scene's boundary-edge
+  count. Localises the spec's "closed boundary between interior and
+  exterior" invariant breakage as discrete holes. Added to the `repair`
+  fuzz target's panic-freedom surface.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-stl/compare/v0.0.3...v0.0.4) - 2026-06-15
 
 ### Other
