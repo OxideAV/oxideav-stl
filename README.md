@@ -1172,15 +1172,14 @@ results are bit-stable across hosts and runs):
   warning on the T-junction rule is empirically substantiated.
 
 Run with `cargo bench -p oxideav-stl --bench <name>` or `--quick
---noplot` for a fast headline sweep. Indicative round-175 numbers
+--noplot` for a fast headline sweep. Indicative numbers
 on an Apple M-series host (`cargo bench --quick`, optimised
 profile): binary decode ~7.6 GiB/s at 100 K triangles; ASCII decode
-~720 MiB/s; binary encode ~7.9 GiB/s at 10 K triangles after the
-round-175 pack-record optimisation (≈3× the round-161 baseline at
-matched N); ASCII encode 9.2 ms/10 K triangles; default-rule
+~720 MiB/s; binary encode ~7.9 GiB/s at 10 K triangles; ASCII encode
+9.2 ms/10 K triangles; default-rule
 `validate` ~2.6–3.8 Melem/s; T-junction sub-check ~50–410 Kelem/s
-(a 70× brake vs the default rules at matched N — exactly the
-diagnostic-only cost the README has documented since round 10).
+(a 70× brake vs the default rules at matched N — the
+diagnostic-only cost noted on that rule above).
 
 ## Profiling
 
