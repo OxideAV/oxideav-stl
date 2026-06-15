@@ -1290,6 +1290,124 @@ fn sort_by_z_in_primitive(prim: &mut Primitive, report: &mut SortByZReport) {
     }
 }
 
+/// Outcome of a [`check_z_sorted`] pass.
+///
+/// The non-mutating diagnostic counterpart of
+/// [`repair_sort_triangles_by_z`]: it answers "are the triangles
+/// already in the ascending-z emit order the spec recommends?" without
+/// touching the scene. Counters are summed across every `Triangles`
+/// primitive.
+///
+/// The two functions agree by construction — they share the same
+/// per-triangle z-key ([`min_z`, `mid_z`, `max_z`] under
+/// [`f32::total_cmp`]) and the same lexicographic ordering — so for any
+/// scene `check_z_sorted(scene).is_sorted()` is `true` **iff**
+/// `repair_sort_triangles_by_z(&mut scene.clone()).triangles_reordered
+/// == 0`. The diagnostic is the cheaper of the two when the caller only
+/// needs the yes/no answer (one linear scan, no permutation, no buffer
+/// rewrite, no allocation).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ZSortReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every `Triangles` primitive in the scene.
+    pub triangles_inspected: usize,
+    /// Number of adjacent triangle pairs `(i, i + 1)` *within the same
+    /// primitive* whose z-keys are strictly out of order
+    /// (`key[i] > key[i + 1]`). Zero iff every primitive is already in
+    /// non-decreasing z-key order. Pairs that straddle a primitive
+    /// boundary are never counted — each primitive is sorted
+    /// independently by the repair, so its order is independent too.
+    pub out_of_order_pairs: usize,
+    /// 1-based global triangle index (counting across primitives in
+    /// scene order, exactly as [`FaceLocator`] does) of the *first*
+    /// triangle that is strictly smaller than its predecessor within
+    /// its primitive, or `None` when the scene is already sorted. This
+    /// is the earliest place the recommended order breaks — the natural
+    /// cursor for a "show me where it goes wrong" report.
+    pub first_out_of_order_triangle: Option<usize>,
+}
+
+impl ZSortReport {
+    /// `true` iff every `Triangles` primitive is already in the
+    /// ascending-z emit order the 1989 spec recommends — equivalently,
+    /// [`Self::out_of_order_pairs`] `== 0`. An empty scene (no
+    /// triangles) is trivially sorted.
+    pub fn is_sorted(&self) -> bool {
+        self.out_of_order_pairs == 0
+    }
+}
+
+/// Report whether every `Triangles` primitive's triangles are already
+/// in ascending-z emit order, without mutating the scene.
+///
+/// The 1989 spec notes: *"Sorting the triangles in ascending z-value
+/// order is recommended, but not required, in order to optimize
+/// performance of the slice program."* This is the non-mutating
+/// diagnostic counterpart of [`repair_sort_triangles_by_z`]: pipelines
+/// that must *decide* whether to pay for a re-sort (or that want to
+/// *report* spec-recommended-order conformance) get the yes/no answer
+/// plus the first offending position in a single linear scan, without
+/// the permutation + buffer rewrite the repair performs.
+///
+/// ## Sort key (identical to the repair)
+///
+/// Each triangle is keyed on its three corner z-values sorted ascending
+/// — `(min_z, mid_z, max_z)` — compared lexicographically with
+/// [`f32::total_cmp`]. A triangle is "in order" relative to its
+/// predecessor *within the same primitive* when its key is
+/// `>=` the predecessor's. A corner whose index buffer cannot be
+/// resolved contributes the same `f32::NAN` high sentinel the repair
+/// uses, so a malformed facet sorts to the high end here too — and the
+/// diagnostic's verdict therefore matches what the repair would do.
+///
+/// ## Per-primitive scope
+///
+/// Each `Triangles` primitive is checked independently: the repair
+/// sorts every primitive's faces among themselves and never moves a
+/// face across a primitive boundary, so a pair straddling two
+/// primitives is never "out of order". Non-`Triangles` primitives are
+/// skipped (they contribute nothing to `triangles_inspected`).
+///
+/// Returns a single [`ZSortReport`] summed across the scene.
+pub fn check_z_sorted(scene: &Scene3D) -> ZSortReport {
+    let mut report = ZSortReport::default();
+    let mut global_idx: usize = 0;
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            report.triangles_inspected += face_count;
+            let mut prev: Option<[f32; 3]> = None;
+            for face_idx in 0..face_count {
+                global_idx += 1;
+                let key = triangle_z_key(prim, face_idx);
+                if let Some(p) = prev {
+                    // Strictly-out-of-order iff the previous key is
+                    // greater than this one under the same lexicographic
+                    // total order the repair sorts by.
+                    let cmp = p[0]
+                        .total_cmp(&key[0])
+                        .then_with(|| p[1].total_cmp(&key[1]))
+                        .then_with(|| p[2].total_cmp(&key[2]));
+                    if cmp == std::cmp::Ordering::Greater {
+                        report.out_of_order_pairs += 1;
+                        if report.first_out_of_order_triangle.is_none() {
+                            report.first_out_of_order_triangle = Some(global_idx);
+                        }
+                    }
+                }
+                prev = Some(key);
+            }
+        }
+    }
+    report
+}
+
 /// Default safety margin for [`repair_translate_to_positive_octant`].
 ///
 /// The 1989 spec requires every vertex coordinate to be
@@ -3484,6 +3602,132 @@ mod tests {
         let mut sorted = zs.clone();
         sorted.sort_by(f32::total_cmp);
         assert_eq!(zs, sorted);
+    }
+
+    // ---- check_z_sorted ------------------------------------------------
+
+    #[test]
+    fn check_z_sorted_empty_scene_is_sorted() {
+        let scene = Scene3D::new();
+        let r = check_z_sorted(&scene);
+        assert_eq!(r, ZSortReport::default());
+        assert!(r.is_sorted());
+        assert_eq!(r.first_out_of_order_triangle, None);
+    }
+
+    #[test]
+    fn check_z_sorted_true_on_ascending_scene() {
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let scene =
+            scene_with_primitives(vec![soup_from_faces(&[flat(1.0), flat(2.0), flat(3.0)])]);
+        let r = check_z_sorted(&scene);
+        assert!(r.is_sorted());
+        assert_eq!(r.triangles_inspected, 3);
+        assert_eq!(r.out_of_order_pairs, 0);
+        assert_eq!(r.first_out_of_order_triangle, None);
+    }
+
+    #[test]
+    fn check_z_sorted_false_on_descending_scene() {
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let scene =
+            scene_with_primitives(vec![soup_from_faces(&[flat(5.0), flat(1.0), flat(3.0)])]);
+        let r = check_z_sorted(&scene);
+        assert!(!r.is_sorted());
+        assert_eq!(r.triangles_inspected, 3);
+        // pairs (5,1) and (1,3): only (5,1) is descending → one bad pair.
+        assert_eq!(r.out_of_order_pairs, 1);
+        // First break is the 2nd triangle (1-based) — z=1 after z=5.
+        assert_eq!(r.first_out_of_order_triangle, Some(2));
+    }
+
+    #[test]
+    fn check_z_sorted_agrees_with_repair_zero_reorder() {
+        // Acceptance parity: `is_sorted()` is true iff the repair would
+        // reorder nothing. Sweep a handful of orderings.
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let cases: &[&[f32]] = &[
+            &[1.0, 2.0, 3.0],
+            &[3.0, 2.0, 1.0],
+            &[1.0, 3.0, 2.0],
+            &[2.0, 2.0, 2.0],
+            &[1.0, 1.0, 2.0, 0.5],
+        ];
+        for zs in cases {
+            let faces: Vec<_> = zs.iter().map(|&z| flat(z)).collect();
+            let scene = scene_with_primitives(vec![soup_from_faces(&faces)]);
+            let diag = check_z_sorted(&scene);
+            let mut clone = scene.clone();
+            let rep = repair_sort_triangles_by_z(&mut clone);
+            assert_eq!(
+                diag.is_sorted(),
+                rep.triangles_reordered == 0,
+                "mismatch for {zs:?}: diag={diag:?} rep={rep:?}"
+            );
+            assert_eq!(diag.triangles_inspected, rep.triangles_inspected);
+        }
+    }
+
+    #[test]
+    fn check_z_sorted_does_not_mutate() {
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let scene =
+            scene_with_primitives(vec![soup_from_faces(&[flat(9.0), flat(2.0), flat(7.0)])]);
+        // `Scene3D` has no `PartialEq`; observe the per-face emit order
+        // stays shuffled (the repair would re-order it; the diagnostic
+        // must not).
+        let before = face_min_zs(&scene.meshes[0].primitives[0]);
+        let _ = check_z_sorted(&scene);
+        let after = face_min_zs(&scene.meshes[0].primitives[0]);
+        assert_eq!(before, after);
+        assert_eq!(after, vec![9.0, 2.0, 7.0]);
+    }
+
+    #[test]
+    fn check_z_sorted_per_primitive_boundary_not_counted() {
+        // Two primitives, each individually sorted, but the second
+        // starts below where the first ended. A boundary-straddling pair
+        // must NOT count (the repair sorts each primitive on its own).
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let p0 = soup_from_faces(&[flat(5.0), flat(6.0)]);
+        let p1 = soup_from_faces(&[flat(1.0), flat(2.0)]);
+        let scene = scene_with_primitives(vec![p0, p1]);
+        let r = check_z_sorted(&scene);
+        assert!(r.is_sorted(), "{r:?}");
+        assert_eq!(r.out_of_order_pairs, 0);
+        assert_eq!(r.triangles_inspected, 4);
+    }
+
+    #[test]
+    fn check_z_sorted_skips_non_triangles() {
+        let mut points = Primitive::new(Topology::Points);
+        points.positions = vec![[0.0, 0.0, 9.0], [0.0, 0.0, 1.0]];
+        let scene = scene_with_primitives(vec![points]);
+        let r = check_z_sorted(&scene);
+        assert_eq!(r.triangles_inspected, 0);
+        assert!(r.is_sorted());
+    }
+
+    #[test]
+    fn check_z_sorted_nan_face_sorts_last_is_in_order() {
+        // An all-NaN face after every finite face keys to the NaN-high
+        // sentinel — that is exactly the repair's target order, so the
+        // diagnostic reports already-sorted.
+        let flat = |z: f32| [[0.0, 0.0, z], [1.0, 0.0, z], [0.0, 1.0, z]];
+        let nan_face = [
+            [0.0, 0.0, f32::NAN],
+            [1.0, 0.0, f32::NAN],
+            [0.0, 1.0, f32::NAN],
+        ];
+        let scene = scene_with_primitives(vec![soup_from_faces(&[flat(2.0), flat(8.0), nan_face])]);
+        let r = check_z_sorted(&scene);
+        assert!(r.is_sorted(), "{r:?}");
+        // The reverse (NaN face first) is out of order.
+        let scene2 =
+            scene_with_primitives(vec![soup_from_faces(&[nan_face, flat(2.0), flat(8.0)])]);
+        let r2 = check_z_sorted(&scene2);
+        assert!(!r2.is_sorted());
+        assert_eq!(r2.first_out_of_order_triangle, Some(2));
     }
 
     // ---- translate_to_positive_octant ----------------------------------

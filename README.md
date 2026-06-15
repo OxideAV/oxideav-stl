@@ -768,6 +768,35 @@ a time. The pass never adds, removes, or mutates a triangle's geometry —
 it is a pure count-preserving reordering, and non-`Triangles` primitives
 are skipped.
 
+### Ascending-z diagnostic (non-mutating)
+
+When you only need to *know* whether a scene already meets the
+recommended order — for example to decide whether a re-sort is worth
+paying for, or to *report* spec-recommended-order conformance —
+`check_z_sorted` answers without mutating the scene:
+
+```rust
+use oxideav_stl::check_z_sorted;
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+let report = check_z_sorted(&scene);
+if !report.is_sorted() {
+    // first descent is `report.first_out_of_order_triangle` (1-based)
+}
+```
+
+It shares the repair's exact per-triangle z-key and lexicographic
+ordering, so the two agree by construction:
+`check_z_sorted(scene).is_sorted()` is `true` **iff**
+`repair_sort_triangles_by_z` would report `triangles_reordered == 0` on
+the same scene. The `ZSortReport` carries `triangles_inspected`,
+`out_of_order_pairs` (adjacent within-primitive descents — boundary-
+straddling pairs are never counted, matching the repair's per-primitive
+scope), and `first_out_of_order_triangle` (1-based global triangle index
+of the earliest descent, or `None` when sorted). It is one linear scan
+with no permutation, buffer rewrite, or allocation — strictly cheaper
+than clone-and-sort when only the yes/no answer is needed.
+
 ## Translate-to-positive-octant repair (spec all-positive-octant fix-up)
 
 The 1989 spec says: *"The object represented must be located in the

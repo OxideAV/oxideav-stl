@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Round 311 — `check_z_sorted(scene) -> ZSortReport`: non-mutating
+  diagnostic counterpart of `repair_sort_triangles_by_z`. The 1989 spec
+  notes "Sorting the triangles in ascending z-value order is
+  recommended, but not required, in order to optimize performance of the
+  slice program" (`docs/3d/stl/fabbers-stl-format.html` §6.5, Format
+  Specifications); the repair *materialises* that recommendation, but
+  pipelines that only need to *decide* whether to pay for a re-sort (or
+  to *report* spec-recommended-order conformance) previously had to
+  clone-and-sort to find out. The new diagnostic answers the yes/no
+  question plus the first offending position in a single linear scan —
+  no permutation, no buffer rewrite, no allocation. It shares the
+  repair's exact per-triangle z-key (`(min_z, mid_z, max_z)` compared
+  lexicographically with `f32::total_cmp`, malformed-face corners
+  contributing the same `f32::NAN` high sentinel), so the two agree by
+  construction: `check_z_sorted(scene).is_sorted()` is `true` iff
+  `repair_sort_triangles_by_z` would report `triangles_reordered == 0`
+  on the same scene (verified by an acceptance-parity sweep). The
+  `ZSortReport` carries `triangles_inspected`, `out_of_order_pairs`
+  (adjacent within-primitive descents — boundary-straddling pairs are
+  never counted, mirroring the repair's per-primitive scope), and
+  `first_out_of_order_triangle` (1-based global triangle index of the
+  earliest descent, or `None` when sorted), with an `is_sorted()`
+  convenience. Non-`Triangles` primitives are skipped; an empty scene is
+  trivially sorted. Re-exported from the crate root alongside the repair
+  family. 8 new unit tests + 6 integration tests
+  (`tests/check_z_sorted.rs`, driven through the public decoder).
+
 - Round 304 — seventh strict-spec ASCII lint rule: empty-`solid`-block
   detection. The spec's ASCII grammar repeats the facet body with the
   `{…}`+ notation, where the `+` means "one or more times", so a
