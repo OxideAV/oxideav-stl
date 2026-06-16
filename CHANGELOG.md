@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `topology::repair_cap_boundary_loops` — mutating fix-up that
+  triangulates each closed naked-edge (boundary) loop with a fan,
+  restoring the 1989 spec's closed-surface invariant ("each facet is
+  part of the boundary between the interior and the exterior of the
+  object"). The matching repair for the `boundary_loops` extraction:
+  per-`Triangles`-primitive isolation, boundary edges chained into
+  loops the same way `boundary_loops` chains them, and the cap fan
+  wound to traverse each boundary edge in the opposite direction so a
+  used-once edge becomes a used-twice manifold edge. A closed `n`-edge
+  loop caps to `n − 2` fan triangles rooted at the loop's
+  lexicographically-smallest vertex. Open (non-manifold) chains are
+  skipped (`open_chains_skipped`) rather than guessed, sub-three-edge
+  loops are skipped (`degenerate_loops_skipped`), and a
+  `normals`/`positions` length mismatch skips the primitive
+  (`skipped_length_mismatch`). Indexed primitives reuse existing corner
+  slots and preserve the `U16`/`U32` discriminant unless a fresh slot
+  overflows `u16::MAX`; cap triangles inherit the all-zero face-normal
+  sentinel so a follow-up `repair_recompute_zero_normals` →
+  `repair_orient_normals_from_winding` fills them from the cap winding.
+  `loops_capped == 0` is the idempotency signal. `CapBoundaryLoopsReport`
+  re-exported from the crate root; added to the `repair` fuzz target's
+  panic-freedom surface (per-pass clone + full pipeline). 5 new unit
+  tests + 4 integration tests (`tests/repair_cap_boundary_loops.rs`,
+  driven through the public decoder + the watertight validate rule).
 - `topology::boundary_loops` — non-mutating extraction of ordered
   naked-edge (boundary) loops. Where `Shell::boundary_edges` and the
   validate module merely *count* edges used by a single triangle, this

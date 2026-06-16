@@ -2733,6 +2733,314 @@ fn point_strictly_on_segment_t(p: [f32; 3], q: [f32; 3], v: [f32; 3], eps: f32) 
     }
 }
 
+/// Outcome of a [`repair_cap_boundary_loops`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. The 1989 spec says each facet "is part of the boundary
+/// between the interior and the exterior of the object" — a valid STL
+/// solid is *closed*, with no boundary edges at all. This repair
+/// restores that invariant per-primitive by triangulating each closed
+/// naked-edge loop with a fan, so every boundary edge the cap touches
+/// goes from used-once (boundary) to used-twice (manifold).
+///
+/// `loops_capped == 0` is the idempotency signal — a primitive with no
+/// closed boundary loops (already watertight, or whose only naked
+/// edges form non-manifold open chains) is left untouched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CapBoundaryLoopsReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive, on entry.
+    pub triangles_inspected: usize,
+    /// Number of closed boundary loops that were capped with a fan.
+    pub loops_capped: usize,
+    /// Number of cap triangles emitted. A closed loop with `n`
+    /// boundary edges caps to `n - 2` fan triangles, so this is the
+    /// sum of `(edge_count - 2)` over every capped loop.
+    pub cap_triangles_emitted: usize,
+    /// Number of *open* boundary chains skipped — a non-manifold
+    /// boundary (three-plus naked edges meeting at a point) that does
+    /// not bound a single well-defined hole, so the pass refuses to
+    /// guess a cap rather than emit nonsense geometry.
+    pub open_chains_skipped: usize,
+    /// Number of closed loops with fewer than three boundary edges
+    /// (a degenerate two-edge "sliver" hole) that were skipped — a
+    /// triangle fan needs at least three corners.
+    pub degenerate_loops_skipped: usize,
+    /// Number of primitives skipped because their `normals` array
+    /// length disagreed with `positions` — a producer-bug signal.
+    /// Capping would force us to invent per-vertex normal entries for
+    /// the new corners; we leave the whole primitive alone instead.
+    pub skipped_length_mismatch: usize,
+}
+
+/// Cap every closed boundary loop in `scene` by triangulating it,
+/// restoring the spec's closed-surface invariant per-primitive.
+///
+/// The 1989 spec says each facet "is part of the boundary between the
+/// interior and the exterior of the object" — a valid STL solid is
+/// closed, with no edge used by only one triangle. When a producer
+/// emits a surface with holes, every hole shows up as a *boundary
+/// loop* (the cycle formed by edges used by exactly one triangle —
+/// see [`boundary_loops`]). This pass is the matching mutating fix-up:
+/// for each **closed** loop it emits a triangle fan that turns every
+/// boundary edge the cap touches into a manifold (used-twice) edge.
+///
+/// Per-`Triangles`-primitive isolation (no cross-primitive boundary
+/// merging — unlike the scene-wide [`boundary_loops`] diagnostic).
+/// Within a primitive, boundary edges are the directed edges whose
+/// undirected key is used exactly once. They are chained into loops
+/// the same way [`boundary_loops`] chains them; a loop walked
+/// tail-to-head keeps the surface consistently on one side, so the cap
+/// fan is wound to traverse each boundary edge in the *opposite*
+/// direction (turning a used-once edge into a used-twice manifold
+/// edge). The fan is rooted at the loop's lexicographically-smallest
+/// vertex for determinism.
+///
+/// Open (non-manifold) boundary chains are counted under
+/// [`CapBoundaryLoopsReport::open_chains_skipped`] and left alone — a
+/// chain that did not close on itself does not bound a single
+/// well-defined hole, so guessing a cap would invent geometry. Closed
+/// loops with fewer than three edges are counted under
+/// `degenerate_loops_skipped`. Non-`Triangles` primitives are silently
+/// skipped, as is any primitive whose `normals` length disagrees with
+/// its `positions` length (`skipped_length_mismatch`).
+///
+/// Cap triangles inherit the all-zero face normal sentinel
+/// (`[0.0, 0.0, 0.0]`) when the primitive carries per-vertex normals,
+/// so a follow-up [`repair_recompute_zero_normals`] →
+/// [`repair_orient_normals_from_winding`] fills them from the cap
+/// winding without disturbing the surrounding surface's stored
+/// normals.
+///
+/// A lone free triangle's three edges are each used once, so its
+/// perimeter is itself a closed 3-edge loop: capping mirrors it into
+/// one reversed fan triangle, yielding a zero-volume but edge-manifold
+/// two-triangle shell. This falls out of the general rule rather than
+/// being a special case.
+///
+/// `loops_capped == 0` is the idempotency signal: re-running on a
+/// scene whose primitives are each edge-manifold (or whose only naked
+/// edges form open chains) is a no-op.
+pub fn repair_cap_boundary_loops(scene: &mut Scene3D) -> CapBoundaryLoopsReport {
+    let mut report = CapBoundaryLoopsReport::default();
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            cap_boundary_loops_in_primitive(prim, &mut report);
+        }
+    }
+    report
+}
+
+/// Per-primitive cap pass. Chains the primitive's boundary edges into
+/// loops and emits a fan for each closed one.
+fn cap_boundary_loops_in_primitive(prim: &mut Primitive, report: &mut CapBoundaryLoopsReport) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    // A length-mismatched normals array is a producer-bug signal;
+    // emitting cap triangles would force us to invent per-vertex normal
+    // entries, so we skip the whole primitive (mirrors the
+    // T-junction-split pass).
+    let normals_match = match prim.normals.as_ref() {
+        Some(ns) => ns.len() == prim.positions.len(),
+        None => true,
+    };
+    if !normals_match {
+        report.skipped_length_mismatch += 1;
+        return;
+    }
+
+    // Count undirected edge uses and record each directed instance by
+    // its bit-exact vertex keys (matches `boundary_loops`).
+    let mut undirected_uses: HashMap<(VertKey, VertKey), usize> = HashMap::new();
+    let mut directed: Vec<(VertKey, VertKey)> = Vec::new();
+    for face_idx in 0..face_count {
+        let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+        let (a, b, c) = match (
+            prim.positions.get(vi0),
+            prim.positions.get(vi1),
+            prim.positions.get(vi2),
+        ) {
+            (Some(a), Some(b), Some(c)) => (*a, *b, *c),
+            // Out-of-range index slot — the drop-degenerates pass owns
+            // the rejection; skip this face for boundary accounting.
+            _ => continue,
+        };
+        let keys = [VertKey::from(a), VertKey::from(b), VertKey::from(c)];
+        for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+            let (ka, kb) = (keys[i], keys[j]);
+            let key = if ka <= kb { (ka, kb) } else { (kb, ka) };
+            *undirected_uses.entry(key).or_insert(0) += 1;
+            directed.push((ka, kb));
+        }
+    }
+
+    // Boundary adjacency: tail -> heads, restricted to edges used
+    // exactly once (undirected).
+    let mut out_edges: HashMap<VertKey, Vec<VertKey>> = HashMap::new();
+    let mut remaining = 0usize;
+    for (a, b) in directed {
+        let key = if a <= b { (a, b) } else { (b, a) };
+        if undirected_uses.get(&key) == Some(&1) {
+            out_edges.entry(a).or_default().push(b);
+            remaining += 1;
+        }
+    }
+    if remaining == 0 {
+        return;
+    }
+
+    // Deterministic consumption order (matches `boundary_loops`).
+    for heads in out_edges.values_mut() {
+        heads.sort_unstable();
+        heads.reverse();
+    }
+    let mut tails: Vec<VertKey> = out_edges.keys().copied().collect();
+    tails.sort_unstable();
+
+    // Walk loops; collect the closed ones' ordered vertex keys.
+    let mut closed_loops: Vec<Vec<VertKey>> = Vec::new();
+    for &seed in &tails {
+        while out_edges.get(&seed).is_some_and(|v| !v.is_empty()) {
+            let mut chain: Vec<VertKey> = vec![seed];
+            let mut cur = seed;
+            let mut closed = false;
+            while let Some(next) = out_edges.get_mut(&cur).and_then(|v| v.pop()) {
+                if next == seed {
+                    closed = true;
+                    break;
+                }
+                chain.push(next);
+                cur = next;
+            }
+            if !closed {
+                report.open_chains_skipped += 1;
+                continue;
+            }
+            if chain.len() < 3 {
+                report.degenerate_loops_skipped += 1;
+                continue;
+            }
+            closed_loops.push(chain);
+        }
+    }
+
+    if closed_loops.is_empty() {
+        return;
+    }
+
+    // Emit a fan for each closed loop. The loop `chain = [v0, v1, …,
+    // v_{n-1}]` carries the boundary edges `v0→v1, …, v_{n-1}→v0` in
+    // the existing surface's winding. A cap edge must traverse each in
+    // the *opposite* direction so the shared edge goes used-twice
+    // (manifold). Rooting the fan at the loop's lex-smallest vertex
+    // `R`, the fan triangle for boundary edge `vi→vj` (with neither
+    // endpoint == R) is `(R, vj, vi)` — which walks `vj→vi`, the
+    // reverse. Determinism: rotate the chain so `R` is first.
+    let cap_normal = [0.0_f32, 0.0, 0.0];
+    // Map a vertex key to an existing slot index so the cap reuses the
+    // surface's corner slots instead of duplicating positions.
+    let mut slot_of: HashMap<VertKey, u32> = HashMap::with_capacity(prim.positions.len());
+    for (i, p) in prim.positions.iter().enumerate() {
+        slot_of.entry(VertKey::from(*p)).or_insert(i as u32);
+    }
+
+    // Accumulate the new fan triangles as key-triples; resolve to the
+    // primitive's storage shape (indexed vs unindexed) afterwards.
+    let mut fan_tris: Vec<[VertKey; 3]> = Vec::new();
+    for chain in &closed_loops {
+        // Rotate so the lexicographically-smallest vertex is the apex.
+        let apex_pos = chain
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, k)| **k)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let n = chain.len();
+        let apex = chain[apex_pos];
+        // Walk every boundary edge (vi→vj) skipping those incident to
+        // the apex (they collapse to zero-area fan triangles).
+        let mut emitted = 0usize;
+        for e in 0..n {
+            let vi = chain[e];
+            let vj = chain[(e + 1) % n];
+            if vi == apex || vj == apex {
+                continue;
+            }
+            // Cap triangle reverses the boundary edge: (apex, vj, vi).
+            fan_tris.push([apex, vj, vi]);
+            emitted += 1;
+        }
+        report.loops_capped += 1;
+        report.cap_triangles_emitted += emitted;
+    }
+
+    if fan_tris.is_empty() {
+        return;
+    }
+
+    // Resolve a key to a slot, appending a fresh position (+ matched
+    // normal) when the key is not already present.
+    let mut resolve_slot = |prim: &mut Primitive, k: VertKey| -> u32 {
+        if let Some(&s) = slot_of.get(&k) {
+            return s;
+        }
+        let new_slot = prim.positions.len() as u32;
+        prim.positions.push(key_to_pos(k));
+        if let Some(ns) = prim.normals.as_mut() {
+            ns.push(cap_normal);
+        }
+        slot_of.insert(k, new_slot);
+        new_slot
+    };
+
+    match prim.indices.take() {
+        Some(idx) => {
+            let (idx_kind_was_u16, mut raw_idx): (bool, Vec<u32>) = match idx {
+                Indices::U16(v) => (true, v.iter().map(|x| *x as u32).collect()),
+                Indices::U32(v) => (false, v),
+            };
+            for tri in &fan_tris {
+                let s0 = resolve_slot(prim, tri[0]);
+                let s1 = resolve_slot(prim, tri[1]);
+                let s2 = resolve_slot(prim, tri[2]);
+                raw_idx.push(s0);
+                raw_idx.push(s1);
+                raw_idx.push(s2);
+            }
+            let max_index = raw_idx.iter().copied().max().unwrap_or(0);
+            if idx_kind_was_u16 && max_index <= u16::MAX as u32 {
+                let narrowed: Vec<u16> = raw_idx.into_iter().map(|x| x as u16).collect();
+                prim.indices = Some(Indices::U16(narrowed));
+            } else {
+                prim.indices = Some(Indices::U32(raw_idx));
+            }
+        }
+        None => {
+            // Unindexed: append the fan as a flat triangle soup so the
+            // primitive stays unindexed. Each cap corner is a fresh
+            // position slot (the soup never references prior slots).
+            for tri in &fan_tris {
+                for k in tri {
+                    prim.positions.push(key_to_pos(*k));
+                    if let Some(ns) = prim.normals.as_mut() {
+                        ns.push(cap_normal);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4780,5 +5088,119 @@ mod tests {
             "every boundary edge appears in exactly one loop"
         );
         assert!(!loops.is_empty());
+    }
+
+    #[test]
+    fn cap_skips_non_triangles_primitive() {
+        let mut prim = Primitive::new(Topology::Lines);
+        prim.positions
+            .extend_from_slice(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_cap_boundary_loops(&mut scene);
+        assert_eq!(r.triangles_inspected, 0);
+        assert_eq!(r.loops_capped, 0);
+    }
+
+    #[test]
+    fn cap_skips_normals_length_mismatch() {
+        // Open tetra missing one face but with a deliberately
+        // wrong-length normals array — the pass must refuse to invent
+        // per-vertex normals and leave the primitive untouched.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions.extend_from_slice(&[
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+        ]);
+        // 9 positions but only 1 normal slot.
+        prim.normals = Some(vec![[0.0, 0.0, 1.0]]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_cap_boundary_loops(&mut scene);
+        assert_eq!(r.skipped_length_mismatch, 1, "report: {r:?}");
+        assert_eq!(r.loops_capped, 0);
+        // Geometry untouched.
+        assert_eq!(scene.meshes[0].primitives[0].positions.len(), 9);
+    }
+
+    #[test]
+    fn cap_skips_open_non_manifold_chain() {
+        // Three triangles fanned around a shared central edge A–B make
+        // that edge used three times (non-manifold). The remaining
+        // naked edges form chains whose walk hits a vertex with
+        // multiple outgoing boundary edges and cannot close into a
+        // single cycle, so the pass emits open chains rather than
+        // guessing a cap.
+        //   A = (0,0,0)  B = (0,0,1)
+        //   wings P0=(1,0,0) P1=(-1,0,0) P2=(0,1,0)
+        let mut prim = Primitive::new(Topology::Triangles);
+        let a = [0.0_f32, 0.0, 0.0];
+        let b = [0.0_f32, 0.0, 1.0];
+        let p0 = [1.0_f32, 0.0, 0.0];
+        let p1 = [-1.0_f32, 0.0, 0.0];
+        let p2 = [0.0_f32, 1.0, 0.0];
+        prim.positions.extend_from_slice(&[a, b, p0]);
+        prim.positions.extend_from_slice(&[a, b, p1]);
+        prim.positions.extend_from_slice(&[a, b, p2]);
+        prim.normals = Some(vec![[0.0, 0.0, 0.0]; 9]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let before = scene.meshes[0].primitives[0].positions.len();
+        let r = repair_cap_boundary_loops(&mut scene);
+        // The non-manifold A–B edge prevents any single closed loop
+        // from forming; the pass reports open chains and caps nothing.
+        assert_eq!(r.loops_capped, 0, "report: {r:?}");
+        assert!(r.open_chains_skipped >= 1, "report: {r:?}");
+        assert_eq!(r.cap_triangles_emitted, 0);
+        // Untouched geometry (no fan appended).
+        assert_eq!(scene.meshes[0].primitives[0].positions.len(), before);
+    }
+
+    #[test]
+    fn cap_lone_triangle_perimeter_is_a_closed_loop() {
+        // A single free triangle's three edges are each used once, so
+        // its perimeter is itself a closed 3-edge boundary loop. The
+        // cap therefore mirrors the triangle (one reversed fan
+        // triangle), producing a zero-volume but edge-manifold shell —
+        // consistent, documented behaviour rather than a special case.
+        let prim = one_triangle([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_cap_boundary_loops(&mut scene);
+        assert_eq!(r.loops_capped, 1, "report: {r:?}");
+        assert_eq!(r.cap_triangles_emitted, 1);
+        // Now edge-manifold: every edge used exactly twice.
+        assert!(boundary_loops(&scene).is_empty());
+    }
+
+    #[test]
+    fn cap_indexed_primitive_reuses_existing_slots() {
+        // Open tetra as an indexed primitive: the cap must reuse the
+        // four existing corner slots (no new positions appended) since
+        // every loop vertex already has a bit-exact slot.
+        let mut prim = Primitive::new(Topology::Triangles);
+        prim.positions.extend_from_slice(&[
+            [0.0, 0.0, 0.0], // 0 = A
+            [1.0, 0.0, 0.0], // 1 = B
+            [0.0, 1.0, 0.0], // 2 = C
+            [0.0, 0.0, 1.0], // 3 = D
+        ]);
+        prim.normals = Some(vec![[0.0, 0.0, 0.0]; 4]);
+        // Faces A,C,B / A,B,D / A,D,C — leaves B,C,D open.
+        prim.indices = Some(Indices::U32(vec![0, 2, 1, 0, 1, 3, 0, 3, 2]));
+        let mut scene = scene_with_primitives(vec![prim]);
+        let r = repair_cap_boundary_loops(&mut scene);
+        assert_eq!(r.loops_capped, 1, "report: {r:?}");
+        assert_eq!(r.cap_triangles_emitted, 1);
+        let p = &scene.meshes[0].primitives[0];
+        // No new positions — all loop corners already had slots.
+        assert_eq!(p.positions.len(), 4, "cap should reuse existing slots");
+        match &p.indices {
+            Some(Indices::U32(v)) => assert_eq!(v.len(), 12, "3 old + 1 cap = 4 faces"),
+            other => panic!("expected U32 indices, got {other:?}"),
+        }
     }
 }

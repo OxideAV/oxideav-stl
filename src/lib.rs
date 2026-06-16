@@ -59,13 +59,13 @@ pub use encoder::{
 pub use inspect::{inspect_binary_header, BinaryHeaderReport};
 pub use lint::{lint_ascii, AsciiLintFinding, AsciiLintReport, MAX_REPORTED_LINT_FINDINGS};
 pub use topology::{
-    boundary_loops, check_z_sorted, repair_drop_degenerate_triangles,
+    boundary_loops, check_z_sorted, repair_cap_boundary_loops, repair_drop_degenerate_triangles,
     repair_make_winding_consistent, repair_normalize_unit_normals,
     repair_orient_normals_from_winding, repair_recompute_zero_normals, repair_sort_triangles_by_z,
     repair_split_t_junctions, repair_translate_to_positive_octant, repair_weld_vertices, shells,
-    BoundaryLoop, DegenerateDropReport, FaceLocator as TopologyFaceLocator, NormalRecomputeReport,
-    NormalizeReport, OrientReport, Shell, SortByZReport, TJunctionSplitReport,
-    TranslateOctantReport, WeldReport, WindingConsistencyReport, ZSortReport,
+    BoundaryLoop, CapBoundaryLoopsReport, DegenerateDropReport, FaceLocator as TopologyFaceLocator,
+    NormalRecomputeReport, NormalizeReport, OrientReport, Shell, SortByZReport,
+    TJunctionSplitReport, TranslateOctantReport, WeldReport, WindingConsistencyReport, ZSortReport,
     DEFAULT_POSITIVE_OCTANT_MARGIN, DEFAULT_T_JUNCTION_SPLIT_TOLERANCE,
 };
 pub use validate::{

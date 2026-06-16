@@ -997,6 +997,59 @@ vertex-to-vertex → `repair_weld_vertices` +
 positive-octant → `repair_translate_to_positive_octant`,
 consistent-winding → `repair_make_winding_consistent`.
 
+## Cap boundary loops (spec closed-surface fix-up)
+
+The 1989 spec says each facet "is part of the boundary between the
+interior and the exterior of the object" — a valid STL solid is
+*closed*, with no edge used by only one triangle.
+`topology::boundary_loops` *extracts* the holes (the ordered cycles of
+naked edges); `repair_cap_boundary_loops` is the matching mutating
+fix-up that triangulates each closed loop, turning every boundary edge
+the cap touches from used-once (boundary) into used-twice (manifold):
+
+```rust
+use oxideav_stl::repair_cap_boundary_loops;
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+let report = repair_cap_boundary_loops(&mut scene);
+```
+
+Per-`Triangles`-primitive isolation (no cross-primitive boundary
+merging — unlike the scene-wide `boundary_loops` diagnostic). Within a
+primitive, boundary edges are the directed edges whose undirected key
+is used exactly once; they are chained into loops the same way
+`boundary_loops` chains them. A loop walked tail-to-head keeps the
+surface consistently on one side, so the cap fan is wound to traverse
+each boundary edge in the *opposite* direction. The fan is rooted at
+the loop's lexicographically-smallest vertex for determinism, and a
+closed loop with `n` edges caps to `n − 2` fan triangles.
+
+`CapBoundaryLoopsReport { triangles_inspected, loops_capped,
+cap_triangles_emitted, open_chains_skipped, degenerate_loops_skipped,
+skipped_length_mismatch }` — `loops_capped == 0` is the idempotency
+signal. Open (non-manifold) boundary chains that do not close on
+themselves are counted under `open_chains_skipped` and left alone — a
+chain that did not close does not bound a single well-defined hole, so
+guessing a cap would invent geometry. Closed loops with fewer than
+three edges land in `degenerate_loops_skipped`; a primitive whose
+`normals` length disagrees with `positions` is skipped under
+`skipped_length_mismatch` so the pass never fabricates per-vertex
+normal entries.
+
+Indexed primitives reuse existing corner slots when a loop vertex's
+bit-exact key already has one (appending only genuinely-new positions),
+preserving the `Indices::U16` / `Indices::U32` discriminant unless a
+fresh slot pushes the count past `u16::MAX`. Unindexed primitives have
+the cap fan appended as a flat triangle soup. Cap triangles inherit the
+all-zero face-normal sentinel, so a follow-up `repair_recompute_zero_normals`
+→ `repair_orient_normals_from_winding` fills them from the cap winding
+without disturbing the surrounding surface's stored normals. A lone
+free triangle's perimeter is itself a closed 3-edge loop, so capping
+mirrors it into one reversed fan triangle (a zero-volume but
+edge-manifold shell) — this falls out of the general rule rather than
+being a special case. Cross-primitive holes are not detected;
+pre-merge primitives with `repair_weld_vertices` first.
+
 ## Binary-header inspector (pre-decode triage)
 
 `oxideav_stl::inspect_binary_header(bytes)` is a typed,
@@ -1175,9 +1228,9 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
   targets never reach: `validate` with every rule on (including the
   opt-in `check_t_junctions` / `check_positive_octant` brute-force
   scans), `bbox` / `bbox_of_mesh` / `bbox_of_primitive`, `shells`, and
-  every mutating repair pass — individually on per-pass clones and as
-  the full documented nine-step pipeline on one scene, re-validated at
-  the end. Each pass takes a caller-controlled scene and must return
+  every mutating repair pass (including `repair_cap_boundary_loops`) —
+  individually on per-pass clones and as the full documented pipeline
+  on one scene, re-validated at the end. Each pass takes a caller-controlled scene and must return
   its report rather than panic / index past a buffer / overflow on a
   bad index / divide by zero. A 60-second local sweep (≈480 K
   executions) found zero crashes; the corpus is checked in minimised

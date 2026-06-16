@@ -35,11 +35,11 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_mesh3d::{Indices, Mesh, Node, Primitive, Scene3D, Topology};
 use oxideav_stl::{
-    bbox, bbox_of_mesh, bbox_of_primitive, boundary_loops, repair_drop_degenerate_triangles,
-    repair_make_winding_consistent, repair_normalize_unit_normals,
-    repair_orient_normals_from_winding, repair_recompute_zero_normals, repair_sort_triangles_by_z,
-    repair_split_t_junctions, repair_translate_to_positive_octant, repair_weld_vertices, shells,
-    validate, ValidationOptions,
+    bbox, bbox_of_mesh, bbox_of_primitive, boundary_loops, repair_cap_boundary_loops,
+    repair_drop_degenerate_triangles, repair_make_winding_consistent,
+    repair_normalize_unit_normals, repair_orient_normals_from_winding,
+    repair_recompute_zero_normals, repair_sort_triangles_by_z, repair_split_t_junctions,
+    repair_translate_to_positive_octant, repair_weld_vertices, shells, validate, ValidationOptions,
 };
 
 /// A forward byte cursor over the fuzz buffer. Reads zero-pad past the
@@ -227,6 +227,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = repair_translate_to_positive_octant(&mut scene.clone(), 1e-6);
     let _ = repair_make_winding_consistent(&mut scene.clone());
     let _ = repair_split_t_junctions(&mut scene.clone(), 1e-5);
+    let _ = repair_cap_boundary_loops(&mut scene.clone());
 
     // --- the documented full pipeline, in order, on a single scene ---
     // The README spells out a nine-step repair sequence; running it
@@ -243,6 +244,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = repair_translate_to_positive_octant(&mut piped, 1e-6);
     let _ = repair_make_winding_consistent(&mut piped);
     let _ = repair_split_t_junctions(&mut piped, 1e-5);
+    let _ = repair_cap_boundary_loops(&mut piped);
 
     // Re-validate the fully-repaired scene — the repair pipeline must
     // leave a scene the validator can still walk without panicking.
