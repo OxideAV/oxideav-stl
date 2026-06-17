@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `topology::mesh_volume` — non-mutating signed enclosed-volume
+  diagnostic. Sums the divergence-theorem per-facet signed tetrahedron
+  volume `(v0 · (v1 × v2)) / 6` over every `Triangles` facet, each
+  tetrahedron spanning the coordinate origin and one triangle. For a
+  closed surface the magnitude is the enclosed volume and the sign
+  carries the winding orientation: positive for the right-hand-rule
+  outward orientation the 1989 spec mandates, negative for an
+  inside-out mesh. The new `MeshVolumeReport` exposes `signed_volume`,
+  `triangles_summed`, a `had_non_finite` flag (set when any summed
+  corner is NaN/±∞), plus `volume()` (`signed_volume.abs()`) and a
+  `winds_outward()` orientation hint (`Some(true)`/`Some(false)` by
+  sign, `None` for an exactly-zero or non-finite sum). Accumulation is
+  in `f64` (corners promoted from `f32` first) so million-facet meshes
+  do not lose the running sum to single-precision cancellation. Reads
+  vertex positions in stored order — winding *is* the signal, so no
+  canonicalisation is applied — and skips non-`Triangles` primitives
+  like the rest of the module. Watertightness (via `validate`'s
+  `watertight` rule or `boundary_loops` returning empty) is the
+  precondition for reading `signed_volume` as a true enclosed volume;
+  the report does not itself decide watertightness.
 - `topology::repair_cap_boundary_loops` — mutating fix-up that
   triangulates each closed naked-edge (boundary) loop with a fan,
   restoring the 1989 spec's closed-surface invariant ("each facet is

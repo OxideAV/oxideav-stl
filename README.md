@@ -650,6 +650,39 @@ stable across runs regardless of triangle-iteration order. A watertight
 scene returns an empty vec. Vertex equality is bit-exact `f32` matching
 (weld floating-point-noise corners via `repair_weld_vertices` first).
 
+### Signed enclosed volume (`mesh_volume`)
+
+`oxideav_stl::mesh_volume(&scene)` is the non-mutating signed-volume
+diagnostic: the divergence-theorem sum of per-facet signed tetrahedron
+volumes `(v0 · (v1 × v2)) / 6`, each tetrahedron spanning the
+coordinate origin and one triangle. For a **closed** surface the
+interior contributions cancel and the sum equals the enclosed volume,
+signed by the winding — positive for the right-hand-rule outward
+orientation the 1989 spec mandates, negative for an inside-out mesh:
+
+```rust
+use oxideav_stl::mesh_volume;
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+let r = mesh_volume(&scene);
+match r.winds_outward() {
+    Some(true) => println!("encloses {} (outward winding)", r.volume()),
+    Some(false) => println!("encloses {} (inside-out — flip winding)", r.volume()),
+    None => println!("flat / empty / non-finite — no orientation"),
+}
+```
+
+The accumulation is done in `f64` (corners promoted from `f32` first)
+so a million-facet mesh does not lose the running sum to single-
+precision cancellation; `MeshVolumeReport` reports `signed_volume`
+(`f64`), `triangles_summed`, and a `had_non_finite` flag, plus the
+`volume()` / `winds_outward()` helpers. The sum reads vertex positions
+in stored order — winding *is* the signal, so no canonicalisation is
+applied — and skips non-`Triangles` primitives. Watertightness (via
+`validate`'s `watertight` rule, or `boundary_loops` returning empty) is
+the precondition for reading `signed_volume` as a true enclosed volume;
+the report does not itself decide watertightness.
+
 `repair_weld_vertices` only mutates `prim.positions` /
 `prim.normals` / `prim.indices` on `Triangles` primitives;
 `prim.extras`, `mesh.name`, and the scene-graph `nodes` / `roots`

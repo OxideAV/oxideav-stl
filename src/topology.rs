@@ -2676,6 +2676,139 @@ fn collect_triangles(scene: &Scene3D) -> Vec<CollectedTri> {
     out
 }
 
+/// Signed enclosed-volume report returned by [`mesh_volume`].
+///
+/// The signed volume of a triangle mesh is the divergence-theorem sum
+/// of per-triangle signed tetrahedron volumes `(v0 · (v1 × v2)) / 6`,
+/// each tetrahedron spanning the coordinate origin and one facet. For
+/// a **closed** surface the contributions of interior structure cancel
+/// and the sum equals the volume the surface encloses, signed by the
+/// facet winding: positive when triangles wind counter-clockwise as
+/// seen from outside (the right-hand-rule outward orientation the 1989
+/// spec mandates), negative when the surface is wound inside-out.
+///
+/// The accumulation is done in `f64` (the corner coordinates are
+/// promoted from `f32` first) so a million-facet mesh does not lose the
+/// running sum to single-precision cancellation; the reported fields
+/// are `f64` for the same reason.
+///
+/// ## Open / non-watertight meshes
+///
+/// The sum is still well-defined for an open mesh, but its value then
+/// depends on where the origin sits relative to the hole(s) and is not
+/// a meaningful volume. [`crate::validate`]'s `watertight` rule (or
+/// [`boundary_loops`] returning empty) is the precondition for reading
+/// [`Self::signed_volume`] as an enclosed volume; this report does not
+/// itself decide watertightness.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeshVolumeReport {
+    /// Number of triangle facets summed across every `Triangles`
+    /// primitive in the scene (post-index-buffer resolution).
+    /// Non-`Triangles` primitives contribute nothing.
+    pub triangles_summed: usize,
+    /// The signed divergence-theorem volume `Σ (v0 · (v1 × v2)) / 6`.
+    /// Sign carries the facet winding orientation; magnitude is the
+    /// enclosed volume for a closed surface. `0.0` for an empty scene.
+    pub signed_volume: f64,
+    /// Whether any corner coordinate summed was non-finite (NaN or ±∞).
+    /// When `true`, [`Self::signed_volume`] may itself be non-finite
+    /// and should not be trusted as a volume; the facet that introduced
+    /// the non-finite value still contributed to `triangles_summed`.
+    pub had_non_finite: bool,
+}
+
+impl MeshVolumeReport {
+    /// Absolute enclosed volume — `signed_volume.abs()`. For a closed
+    /// surface this is the geometry's volume regardless of winding
+    /// orientation. Returns a non-finite value unchanged when
+    /// [`Self::had_non_finite`] is set.
+    pub fn volume(&self) -> f64 {
+        self.signed_volume.abs()
+    }
+
+    /// Winding-orientation hint from the sign of the signed volume:
+    /// `Some(true)` when the volume is strictly positive (facets wind
+    /// outward — the spec's right-hand-rule orientation), `Some(false)`
+    /// when strictly negative (inside-out winding), and `None` when the
+    /// signed volume is exactly zero or non-finite (no orientation can
+    /// be inferred — e.g. an empty scene, a flat sheet through the
+    /// origin, or a mesh with non-finite corners).
+    pub fn winds_outward(&self) -> Option<bool> {
+        if !self.signed_volume.is_finite() || self.signed_volume == 0.0 {
+            None
+        } else {
+            Some(self.signed_volume > 0.0)
+        }
+    }
+}
+
+/// Compute the signed enclosed volume of `scene` without mutating it.
+///
+/// Each triangle facet `(v0, v1, v2)` forms a tetrahedron with the
+/// coordinate origin whose signed volume is `(v0 · (v1 × v2)) / 6`.
+/// Summing that over every facet of a **closed** mesh yields the volume
+/// the surface encloses, signed by the winding: positive for the
+/// right-hand-rule outward orientation the 1989 spec requires, negative
+/// for an inside-out mesh. See [`MeshVolumeReport`] for the
+/// closed-surface precondition and the `f64` accumulation rationale.
+///
+/// This is a pure diagnostic — it reads vertex positions in their
+/// stored order (winding *is* the signal here, so no canonicalisation
+/// is applied) and never touches the scene. Non-`Triangles` primitives
+/// are skipped, matching the rest of this module. An empty scene
+/// returns a report with `signed_volume == 0.0` and
+/// `triangles_summed == 0`.
+pub fn mesh_volume(scene: &Scene3D) -> MeshVolumeReport {
+    let mut report = MeshVolumeReport::default();
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            for face_idx in 0..face_count {
+                let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+                let v0 = match prim.positions.get(vi0) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v1 = match prim.positions.get(vi1) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v2 = match prim.positions.get(vi2) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                report.triangles_summed += 1;
+                // Promote to f64 before the triple product so the
+                // running sum survives large meshes.
+                let a = [v0[0] as f64, v0[1] as f64, v0[2] as f64];
+                let b = [v1[0] as f64, v1[1] as f64, v1[2] as f64];
+                let c = [v2[0] as f64, v2[1] as f64, v2[2] as f64];
+                if !(a.iter().all(|x| x.is_finite())
+                    && b.iter().all(|x| x.is_finite())
+                    && c.iter().all(|x| x.is_finite()))
+                {
+                    report.had_non_finite = true;
+                }
+                // Scalar triple product v0 · (v1 × v2).
+                let cross = [
+                    b[1] * c[2] - b[2] * c[1],
+                    b[2] * c[0] - b[0] * c[2],
+                    b[0] * c[1] - b[1] * c[0],
+                ];
+                let triple = a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2];
+                report.signed_volume += triple / 6.0;
+            }
+        }
+    }
+    report
+}
+
 /// Bit-exact `f32` triple key. Matches the rest of the crate's
 /// well-defined NaN semantics (every NaN bit pattern is a distinct
 /// key).
@@ -3141,6 +3274,38 @@ mod tests {
         assert_eq!(s[0].non_manifold_edges, 0);
         assert!(s[0].is_closed_manifold());
         assert_eq!(s[0].genus(), Some(0));
+    }
+
+    #[test]
+    fn mesh_volume_unit_cube_soup_is_plus_one() {
+        let scene = scene_with_primitives(vec![unit_cube_soup_primitive()]);
+        let r = mesh_volume(&scene);
+        assert_eq!(r.triangles_summed, 12);
+        assert!(!r.had_non_finite);
+        assert!((r.signed_volume - 1.0).abs() < 1e-9);
+        assert_eq!(r.winds_outward(), Some(true));
+    }
+
+    #[test]
+    fn mesh_volume_flags_non_finite_corner() {
+        let mut prim = unit_cube_soup_primitive();
+        prim.positions[0] = [f32::INFINITY, 0.0, 0.0];
+        let scene = scene_with_primitives(vec![prim]);
+        let r = mesh_volume(&scene);
+        assert_eq!(r.triangles_summed, 12);
+        assert!(r.had_non_finite);
+    }
+
+    #[test]
+    fn mesh_volume_skips_non_triangle_primitives() {
+        // A Points primitive contributes nothing to the sum.
+        let mut prim = Primitive::new(Topology::Points);
+        prim.positions = vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let scene = scene_with_primitives(vec![prim]);
+        let r = mesh_volume(&scene);
+        assert_eq!(r.triangles_summed, 0);
+        assert_eq!(r.signed_volume, 0.0);
+        assert_eq!(r.winds_outward(), None);
     }
 
     #[test]
