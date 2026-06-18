@@ -2809,6 +2809,121 @@ pub fn mesh_volume(scene: &Scene3D) -> MeshVolumeReport {
     report
 }
 
+/// Outcome of a [`mesh_surface_area`] pass.
+///
+/// The total area is the sum of every triangle facet's area across
+/// every `Triangles` primitive in the scene. Unlike [`mesh_volume`]
+/// the result is winding- and origin-independent: a triangle and its
+/// reversed-winding twin have the same area, and translating the whole
+/// mesh leaves it unchanged. This makes it the natural companion to the
+/// signed volume — together they bound the geometry without needing the
+/// mesh to be closed (area is meaningful even for an open sheet, where
+/// the enclosed volume is not).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeshSurfaceAreaReport {
+    /// Number of triangle facets summed across every `Triangles`
+    /// primitive in the scene (post-index-buffer resolution).
+    /// Non-`Triangles` primitives contribute nothing.
+    pub triangles_summed: usize,
+    /// The total surface area `Σ ½·|(v1−v0) × (v2−v0)|`. Always
+    /// non-negative for finite input (a magnitude, so winding does not
+    /// affect it). `0.0` for an empty scene; degenerate (collinear or
+    /// coincident) facets contribute `0.0`. See [`Self::had_non_finite`]
+    /// for the non-finite caveat.
+    pub total_area: f64,
+    /// Whether any corner coordinate summed was non-finite (NaN or ±∞).
+    /// When `true`, [`Self::total_area`] may itself be non-finite and
+    /// should not be trusted as an area; the facet that introduced the
+    /// non-finite value still contributed to `triangles_summed`.
+    pub had_non_finite: bool,
+}
+
+impl MeshSurfaceAreaReport {
+    /// Mean triangle area — `total_area / triangles_summed`, or `None`
+    /// when no triangles were summed (an empty scene, or a scene with
+    /// only non-`Triangles` primitives). Useful as a scale hint for
+    /// picking a weld/T-junction tolerance proportional to facet size.
+    pub fn mean_face_area(&self) -> Option<f64> {
+        if self.triangles_summed == 0 {
+            None
+        } else {
+            Some(self.total_area / self.triangles_summed as f64)
+        }
+    }
+}
+
+/// Compute the total surface area of `scene` without mutating it.
+///
+/// Each triangle facet `(v0, v1, v2)` has area
+/// `½·|(v1−v0) × (v2−v0)|` — half the magnitude of the cross product of
+/// two edge vectors. Summing that over every facet yields the mesh's
+/// total surface area. Because it is a magnitude, the result is
+/// independent of winding orientation and of where the origin sits, so
+/// it is well-defined even for an open (non-closed) surface — unlike
+/// [`mesh_volume`], whose enclosed-volume interpretation needs a closed
+/// mesh.
+///
+/// This is a pure diagnostic — it reads vertex positions in their
+/// stored order and never touches the scene. Non-`Triangles` primitives
+/// are skipped, matching the rest of this module. The cross product is
+/// accumulated in `f64` so the running sum survives large meshes.
+/// Degenerate facets (collinear or coincident corners) contribute a
+/// zero-magnitude cross product, i.e. `0.0` area. An empty scene
+/// returns a report with `total_area == 0.0` and `triangles_summed == 0`.
+pub fn mesh_surface_area(scene: &Scene3D) -> MeshSurfaceAreaReport {
+    let mut report = MeshSurfaceAreaReport::default();
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            for face_idx in 0..face_count {
+                let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+                let v0 = match prim.positions.get(vi0) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v1 = match prim.positions.get(vi1) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v2 = match prim.positions.get(vi2) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                report.triangles_summed += 1;
+                // Promote to f64 before the cross product so the running
+                // sum survives large meshes.
+                let a = [v0[0] as f64, v0[1] as f64, v0[2] as f64];
+                let b = [v1[0] as f64, v1[1] as f64, v1[2] as f64];
+                let c = [v2[0] as f64, v2[1] as f64, v2[2] as f64];
+                if !(a.iter().all(|x| x.is_finite())
+                    && b.iter().all(|x| x.is_finite())
+                    && c.iter().all(|x| x.is_finite()))
+                {
+                    report.had_non_finite = true;
+                }
+                // Edge vectors (v1 − v0) and (v2 − v0).
+                let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                // Cross product e1 × e2; its magnitude is twice the area.
+                let cross = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                let mag = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+                report.total_area += 0.5 * mag;
+            }
+        }
+    }
+    report
+}
+
 /// Bit-exact `f32` triple key. Matches the rest of the crate's
 /// well-defined NaN semantics (every NaN bit pattern is a distinct
 /// key).
@@ -3306,6 +3421,49 @@ mod tests {
         assert_eq!(r.triangles_summed, 0);
         assert_eq!(r.signed_volume, 0.0);
         assert_eq!(r.winds_outward(), None);
+    }
+
+    #[test]
+    fn mesh_surface_area_unit_cube_soup_is_six() {
+        let scene = scene_with_primitives(vec![unit_cube_soup_primitive()]);
+        let r = mesh_surface_area(&scene);
+        assert_eq!(r.triangles_summed, 12);
+        assert!(!r.had_non_finite);
+        assert!((r.total_area - 6.0).abs() < 1e-9);
+        assert!((r.mean_face_area().unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mesh_surface_area_flags_non_finite_corner() {
+        let mut prim = unit_cube_soup_primitive();
+        prim.positions[0] = [f32::NAN, 0.0, 0.0];
+        let scene = scene_with_primitives(vec![prim]);
+        let r = mesh_surface_area(&scene);
+        assert_eq!(r.triangles_summed, 12);
+        assert!(r.had_non_finite);
+    }
+
+    #[test]
+    fn mesh_surface_area_skips_non_triangle_primitives() {
+        let mut prim = Primitive::new(Topology::Points);
+        prim.positions = vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let scene = scene_with_primitives(vec![prim]);
+        let r = mesh_surface_area(&scene);
+        assert_eq!(r.triangles_summed, 0);
+        assert_eq!(r.total_area, 0.0);
+        assert_eq!(r.mean_face_area(), None);
+    }
+
+    #[test]
+    fn mesh_surface_area_single_right_triangle_is_half() {
+        let scene = scene_with_primitives(vec![one_triangle([
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ])]);
+        let r = mesh_surface_area(&scene);
+        assert_eq!(r.triangles_summed, 1);
+        assert!((r.total_area - 0.5).abs() < 1e-9);
     }
 
     #[test]

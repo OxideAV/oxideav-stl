@@ -683,6 +683,37 @@ applied — and skips non-`Triangles` primitives. Watertightness (via
 the precondition for reading `signed_volume` as a true enclosed volume;
 the report does not itself decide watertightness.
 
+### Total surface area (`mesh_surface_area`)
+
+`oxideav_stl::mesh_surface_area(&scene)` is the non-mutating companion
+to `mesh_volume`: the sum of every `Triangles` facet's area
+`½·|(v1−v0) × (v2−v0)|` (half the magnitude of the cross product of two
+edge vectors). Because it is a magnitude, the result is **winding- and
+origin-independent** — a facet and its reversed-winding twin report the
+same area, and a rigid translation of the whole mesh leaves the total
+unchanged — so it is well-defined for an *open* sheet too, unlike the
+enclosed volume:
+
+```rust
+use oxideav_stl::mesh_surface_area;
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+let r = mesh_surface_area(&scene);
+println!("{} mm² over {} facets", r.total_area, r.triangles_summed);
+if let Some(mean) = r.mean_face_area() {
+    println!("mean facet {mean} mm² — a weld/T-junction scale hint");
+}
+```
+
+`MeshSurfaceAreaReport` reports `total_area` (`f64`), `triangles_summed`,
+a `had_non_finite` flag, and a `mean_face_area()` helper (`None` when no
+triangles were summed). The cross product is accumulated in `f64`
+(corners promoted from `f32` first) so a million-facet mesh keeps full
+precision; degenerate facets (collinear / coincident corners) contribute
+`0.0`; non-`Triangles` primitives are skipped. Together with
+`mesh_volume` it bounds the geometry — area without needing the mesh to
+be closed, volume once it is.
+
 `repair_weld_vertices` only mutates `prim.positions` /
 `prim.normals` / `prim.indices` on `Triangles` primitives;
 `prim.extras`, `mesh.name`, and the scene-graph `nodes` / `roots`

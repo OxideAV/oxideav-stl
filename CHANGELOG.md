@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `topology::mesh_surface_area` — non-mutating total surface-area
+  diagnostic. Sums each `Triangles` facet's area
+  `½·|(v1−v0) × (v2−v0)|` (half the cross-product magnitude of two edge
+  vectors) across the scene. The new `MeshSurfaceAreaReport` exposes
+  `total_area`, `triangles_summed`, a `had_non_finite` flag (set when
+  any summed corner is NaN/±∞), and a `mean_face_area()` helper
+  (`total_area / triangles_summed`, `None` when no triangles were
+  summed) that doubles as a facet-scale hint for choosing a weld /
+  T-junction tolerance. Being a magnitude, the result is winding- and
+  origin-independent (a facet and its reversed twin share an area; a
+  rigid translation leaves the total unchanged) and is well-defined for
+  an open sheet, unlike the enclosed volume. Degenerate facets
+  (collinear / coincident corners) contribute `0.0`. Accumulation is in
+  `f64` (corners promoted from `f32` first) so million-facet meshes do
+  not lose the running sum to single-precision cancellation. The
+  natural companion to `mesh_volume`: together they bound the geometry
+  without requiring the mesh to be closed.
 - `topology::mesh_volume` — non-mutating signed enclosed-volume
   diagnostic. Sums the divergence-theorem per-facet signed tetrahedron
   volume `(v0 · (v1 × v2)) / 6` over every `Triangles` facet, each
