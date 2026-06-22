@@ -1,0 +1,5 @@
+	solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0		 1
+vertex 1 0 0      id s

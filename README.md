@@ -1279,9 +1279,9 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
   `MAX_REPORTED_LINT_FINDINGS` example cap, the inspector's
   hostile-count `min` cap + `triangle_count == 0` NaN-fraction branch,
   and the colour detector's `chunks_exact(2)` dangling-byte remainder.
-  Panic-freedom is the whole invariant. A 60-second local sweep
-  (≈14.8 M executions) found zero crashes; the corpus is checked in
-  minimised to 363 coverage-preserving seeds.
+  Panic-freedom is the whole invariant. A 120-second local sweep
+  (≈18.3 M executions) found zero crashes; the corpus is checked in
+  minimised to 357 coverage-preserving seeds.
 - `repair` — builds a hostile `Scene3D` **directly** from fuzz bytes
   (no decode step) — multiple meshes, multiple primitives, every
   `Topology` variant, indexed and unindexed primitives, `U16` / `U32`
@@ -1296,13 +1296,42 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
   individually on per-pass clones and as the full documented pipeline
   on one scene, re-validated at the end. Each pass takes a caller-controlled scene and must return
   its report rather than panic / index past a buffer / overflow on a
-  bad index / divide by zero. A 60-second local sweep (≈480 K
+  bad index / divide by zero. A 120-second local sweep (≈305 K
   executions) found zero crashes; the corpus is checked in minimised
   to coverage-preserving seeds.
+
+All four corpora were re-swept (120 s/target, ≈41 M executions total,
+zero crashes) and re-minimised (`cargo +nightly fuzz cmin`) so the
+checked-in seeds stay coverage-distinct as the geometry surface grows;
+the `repair` corpus picked up new coverage-expanding seeds in the
+process.
 
 Run locally with `cargo +nightly fuzz run decode` /
 `cargo +nightly fuzz run roundtrip` / `cargo +nightly fuzz run
 triage` / `cargo +nightly fuzz run repair` from `crates/oxideav-stl/`.
+
+The fuzz targets assert *panic-freedom*; the matching **positive**
+round-trip contracts are pinned as a deterministic, CI-runnable
+property suite in `tests/property_roundtrip.rs`. A self-contained
+PCG-style LCG (no external `proptest` / `quickcheck` dependency)
+sweeps hundreds of seeded inputs across a range of triangle counts
+(0…100), coordinate magnitudes, raw f32 bit-patterns (NaN / ±Inf /
+subnormal), and per-face attribute slots, and asserts:
+
+- **binary record byte-identity** — decode → encode preserves the
+  triangle-count slot and every 50-byte record byte-for-byte (header
+  writer-substituted), the same invariant the `roundtrip` fuzz target
+  drives but as a positive assertion over a broad distribution;
+- **binary re-encode idempotence** — a second decode → encode reaches
+  a fixed point;
+- **ASCII numeric round-trip** — finite-coordinate meshes survive an
+  ASCII encode → decode within the decimal-formatting tolerance, for
+  both encoder-emitted text and independently-generated ASCII text
+  (exercising the parser's tolerance directly);
+- **binary → ASCII → binary** — per-vertex positions survive the
+  cross-flavour hop within tolerance.
+
+Every failure is reproducible from its printed seed.
 
 ## Benchmarks
 

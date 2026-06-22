@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tests/property_roundtrip.rs` — deterministic, CI-runnable property
+  round-trip suite asserting the **positive** byte-identity / numeric
+  contracts the `roundtrip` fuzz target only checks for panic-freedom.
+  A self-contained PCG-style LCG (no `proptest` / `quickcheck`
+  dev-dependency) sweeps hundreds of seeded inputs over triangle counts
+  0…100, coordinate magnitudes, raw f32 bit-patterns (NaN / ±Inf /
+  subnormal), and arbitrary per-face attribute slots, pinning: binary
+  decode → encode record byte-identity (count slot + every 50-byte
+  record survive byte-for-byte, header writer-substituted); binary
+  re-encode idempotence (second decode → encode is a fixed point);
+  ASCII numeric round-trip for both encoder-emitted and
+  independently-generated ASCII text (exercising the parser's tolerance
+  directly); and binary → ASCII → binary per-vertex position survival
+  within the decimal-formatting tolerance. Every failure is
+  reproducible from its printed seed. 5 new tests. Companion to the
+  deepened `fuzz/` corpus (decode / roundtrip / triage targets
+  re-minimised after a 60-second-per-target sweep surfaced new
+  coverage-expanding seeds; zero crashes).
+
 - `topology::mesh_surface_area` — non-mutating total surface-area
   diagnostic. Sums each `Triangles` facet's area
   `½·|(v1−v0) × (v2−v0)|` (half the cross-product magnitude of two edge

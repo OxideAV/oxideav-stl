@@ -1,0 +1,101 @@
+
+
+
+
+
+
+
+
+
+
+
+ solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1   0 0
+vertex  0 1 0
+endloop
+endfacet
+
+endsolid s 0 0 [[[[
+
+
+
+
+
+ solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1   0 0
+vertex  0 1 0
+endloop
+endfacet
+
+endsolid s
+
+
+ solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1   0 0
+vertex  0 1 0
+endloop
+endfacet
+
+endsolid s 0 0 [[[[-[[
+
+
+ solid s
+facet nOrmal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1   0 0
+vertex  0 1 0
+endloop
+endfacet
+
+endsolid s 0 0[
+ solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1   0 0
+vertex  0 1 0
+endloop
+endfacet
+
+endsolid [[[[[[[[[[[
+ solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1   0 0
+vertex  0 1 0
+endloop
+endfacet
+
+endsolid s 0 
+ solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1   0 0
+vertex  0 1 0
+endloop
+endfacet
+
+endsolid s 0 0 [
+ solid s
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1   0 0
+vertex  0 1 0
+endloop
+endfacet
+
+endsolid s 00[[[0
+ver

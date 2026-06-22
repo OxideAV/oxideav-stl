@@ -1,8 +1,0 @@
-solid s
-facet normal 0 0 1
-outer loop
-vertex 5 0 0 
-vertex 0 0 0;
-;BBBx 7 0 0 
-vertex 0 0 0 solid s
-e;e

@@ -1,11 +1,0 @@
-solid s
-facet normal 0 0 1
-#1  1 }ral 0 0 1
-#DDDDD#7et normal 0 0 1
-outer loop
-vertex 0 0 0
-vertex 1 0 0
-vertex 0 1 0
-endloop
-endfacet
-#s

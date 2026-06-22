@@ -1,9 +1,0 @@
-solid s
-facet normal 0 0 1
-outer loop
-vertex 0 0 0
-vertex 17 0 0
-vertex 0 1 0
-;;;;;;rt[0 1 0
-;;; 
-s noo

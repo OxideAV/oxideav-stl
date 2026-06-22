@@ -1,0 +1,6 @@
+solid s
+facet normal 0 0 2
+outer loop
+vertex 1 0 0
+vertex 1 0 1
+       lidfa
