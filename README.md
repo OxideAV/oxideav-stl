@@ -1251,7 +1251,7 @@ against that schema without reading source.
 
 ## Fuzzing
 
-`fuzz/` carries four cargo-fuzz targets driven by a daily GitHub
+`fuzz/` carries five cargo-fuzz targets driven by a daily GitHub
 Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
 
 - `decode` — feeds arbitrary attacker-controlled bytes through
@@ -1299,16 +1299,36 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
   bad index / divide by zero. A 120-second local sweep (≈305 K
   executions) found zero crashes; the corpus is checked in minimised
   to coverage-preserving seeds.
+- `encode` — builds a hostile `Scene3D` **directly** from fuzz bytes
+  (the same cursor as `repair`) and drives the **encoder** + dedup /
+  stats surface that no other target ever feeds an arbitrary scene to:
+  `new_binary().encode`, `new_ascii().encode` across every
+  number-format knob (default round-trip, `with_float_precision`,
+  `with_spec_scientific`), `stats`, the bit-exact + spatial
+  unique-vertex dedup helpers over a tolerance spread (including a
+  negative / non-finite / zero `eps` the spatial binner must clamp to
+  the bit-exact path), and `apply_pre_encode_extras` with the
+  auto-inject toggle on. `roundtrip` only ever encodes a scene that
+  decoded cleanly, and `repair` never calls the encoder at all, so the
+  encoder's handling of caller-built scenes (out-of-range index
+  buffers, normal/position length mismatch, non-finite coordinates fed
+  to the ASCII float lexer) was previously unfuzzed. This target
+  immediately surfaced an out-of-bounds panic in both writers when an
+  index buffer dangled past the position slice (now refused with
+  `InvalidData` — see the Changelog `Fixed` entry +
+  `tests/encode_out_of_range_index.rs`), then ran clean over a
+  150-second sweep.
 
-All four corpora were re-swept (120 s/target, ≈41 M executions total,
-zero crashes) and re-minimised (`cargo +nightly fuzz cmin`) so the
-checked-in seeds stay coverage-distinct as the geometry surface grows;
-the `repair` corpus picked up new coverage-expanding seeds in the
-process.
+All four byte-parsing / scene-analysis corpora were re-swept (120
+s/target, ≈41 M executions total, zero crashes after the encoder fix)
+and re-minimised (`cargo +nightly fuzz cmin`) so the checked-in seeds
+stay coverage-distinct as the geometry surface grows; the `repair`
+corpus picked up new coverage-expanding seeds in the process.
 
 Run locally with `cargo +nightly fuzz run decode` /
 `cargo +nightly fuzz run roundtrip` / `cargo +nightly fuzz run
-triage` / `cargo +nightly fuzz run repair` from `crates/oxideav-stl/`.
+triage` / `cargo +nightly fuzz run repair` / `cargo +nightly fuzz run
+encode` from `crates/oxideav-stl/`.
 
 The fuzz targets assert *panic-freedom*; the matching **positive**
 round-trip contracts are pinned as a deterministic, CI-runnable

@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Encoder out-of-bounds panic on a dangling index buffer.** Both the
+  binary (`binary::encode`) and ASCII (`ascii::encode`) writers resolved
+  a primitive's index-buffer entries and then indexed `prim.positions`
+  with them *without* a bounds check, so a caller-built `Scene3D` whose
+  `Indices::U16` / `U32` buffer referenced a vertex past the position
+  slice (e.g. a glTF / OBJ scene with an index buffer but an empty or
+  short `positions`, or simply an out-of-range entry) panicked with
+  `index out of bounds` instead of returning an error. The resolved
+  vertex indices are now bounds-checked against `positions.len()` and an
+  out-of-range entry is refused with `Error::InvalidData` — STL defines
+  no meaning for a dangling index, so a typed error is the correct
+  response. The decode path never builds index buffers (STL has no
+  vertex sharing), so this only affected the direct-encode API on
+  caller-constructed scenes; no decoded scene was ever at risk.
+  Surfaced by the new `encode` fuzz target; regression-pinned by
+  `tests/encode_out_of_range_index.rs` (6 tests: U16 + U32 rejection on
+  both flavours, plus in-range acceptance).
+
 ### Added
+
+- `fuzz/fuzz_targets/encode.rs` — new cargo-fuzz target driving the
+  **encoder** + dedup / stats surface on a hostile fuzz-built
+  `Scene3D`, a surface the existing targets never fed an arbitrary
+  scene to (`roundtrip` only encodes a cleanly-decoded scene; `repair`
+  never calls the encoder). Drives `new_binary().encode`,
+  `new_ascii().encode` across every number-format knob (default
+  round-trip, `with_float_precision`, `with_spec_scientific`), `stats`,
+  the bit-exact + spatial unique-vertex dedup helpers over a tolerance
+  spread (incl. negative / non-finite / zero `eps` the spatial binner
+  must clamp), and `apply_pre_encode_extras` with auto-inject on.
+  Panic-freedom is the contract; it immediately surfaced the
+  dangling-index OOB fixed above, then ran clean over a 150-second
+  sweep.
 
 - `tests/property_roundtrip.rs` — deterministic, CI-runnable property
   round-trip suite asserting the **positive** byte-identity / numeric

@@ -20,8 +20,12 @@ name: Fuzz
 # scanner outside the decoder path. A fourth `repair` target builds a
 # hostile `Scene3D` directly from fuzz bytes (no decode step) and drives
 # the `validate` + `topology` repair surface — the geometric-analysis
-# passes the byte-parsing targets never reach. The 30-minute budget is
-# split across the four targets by the reusable workflow.
+# passes the byte-parsing targets never reach. A fifth `encode` target
+# builds a hostile `Scene3D` the same way and drives the encoder +
+# dedup / stats surface (both flavours, every number-format knob, the
+# spatial / bit-exact unique-vertex helpers) — the write path no other
+# target ever feeds an arbitrary scene to. The 30-minute budget is
+# split across the five targets by the reusable workflow.
 
 on:
   schedule:

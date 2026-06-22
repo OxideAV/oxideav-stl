@@ -266,6 +266,23 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
                         (b, b + 1, b + 2)
                     }
                 };
+                // Bounds-check the resolved vertex indices against the
+                // position slice. A caller-built scene whose index
+                // buffer carries entries past `positions` (or whose
+                // `positions` is shorter than the index buffer implies)
+                // is refused rather than panicking on an out-of-range
+                // index. STL has no defined meaning for a dangling
+                // index, so `InvalidData` is the correct response. The
+                // decode path never builds index buffers (STL has no
+                // vertex sharing), so this only guards the direct-encode
+                // API on caller-constructed scenes.
+                let max_vi = vi0.max(vi1).max(vi2);
+                if max_vi >= prim.positions.len() {
+                    return Err(Error::InvalidData(format!(
+                        "STL encode: vertex index {max_vi} out of range for {} position(s)",
+                        prim.positions.len()
+                    )));
+                }
                 let v0 = prim.positions[vi0];
                 let v1 = prim.positions[vi1];
                 let v2 = prim.positions[vi2];

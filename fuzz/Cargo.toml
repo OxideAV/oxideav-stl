@@ -90,6 +90,23 @@ cargo-fuzz = true
 #                  overflow on a bad index / divide by zero. Contract:
 #                  every call returns.
 #
+#  * `encode`    — build an arbitrary `Scene3D` directly from fuzz
+#                  bytes (the same hostile-scene cursor as `repair`)
+#                  and drive the ENCODER + dedup / stats surface the
+#                  other targets never feed a hostile scene to:
+#                  `new_binary().encode`, `new_ascii().encode` across
+#                  every number-format knob (default round-trip,
+#                  `with_float_precision`, `with_spec_scientific`),
+#                  `stats`, the bit-exact + spatial unique-vertex dedup
+#                  helpers over a tolerance spread (including a
+#                  negative / non-finite / zero `eps` the spatial
+#                  binner must clamp), and `apply_pre_encode_extras`
+#                  with the auto-inject toggle on. `roundtrip` only
+#                  ever encodes a scene that decoded cleanly; `repair`
+#                  never calls the encoder at all. Contract: every call
+#                  returns rather than panicking / indexing past a
+#                  buffer / dividing by zero on a hostile scene.
+#
 # No external library worth dlopen-ing as a cross-decode oracle: the
 # clean-room wall bars assimp / libigl / openSubdiv / three.js, and
 # the format is simple enough that there's no canonical "what should
@@ -140,5 +157,11 @@ doc = false
 [[bin]]
 name = "repair"
 path = "fuzz_targets/repair.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode"
+path = "fuzz_targets/encode.rs"
 test = false
 doc = false
