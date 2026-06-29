@@ -767,6 +767,47 @@ matching the rest of this module. Together with `mesh_surface_area` (the
 *total* area) and `mesh_volume` (the enclosed volume) it completes the
 scalar-geometry triad: per-facet extents, summed area, summed volume.
 
+### Area- + volume-weighted centroid (`mesh_centroid`)
+
+`oxideav_stl::mesh_centroid(&scene)` is the non-mutating moment
+diagnostic — the natural build-plate-centering companion to `bbox`. The
+spec's positive-octant and ascending-z recommendations are both about
+build-plate placement, and the centroid is the quantity those workflows
+actually translate by. It reports **two** centroids because STL meshes
+are routinely open (a scan, an un-capped surface) as well as closed:
+
+```rust
+use oxideav_stl::mesh_centroid;
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+let r = mesh_centroid(&scene);
+if let Some(c) = r.area_centroid() {
+    println!("surface centroid {c:?} (open or closed)");
+}
+if let Some(c) = r.volume_centroid() {
+    println!("centre of mass {c:?} (closed solid, uniform density)");
+}
+```
+
+- `area_centroid()` — the **area-weighted surface centroid**, the
+  area-weighted mean of every facet's barycentre. Well-defined for any
+  non-empty surface, open or closed; `None` when the total area is zero
+  (empty / all-degenerate scene).
+- `volume_centroid()` — the **volume-weighted centre of mass** of the
+  enclosed solid (uniform density), the divergence-theorem moment
+  `Σ (signed-tet-volume · tet-centroid) / Σ signed-tet-volume`. A true
+  centre of mass only for a **closed** mesh (the same watertightness
+  precondition `mesh_volume` documents); `None` when the signed volume
+  is zero or non-finite. Winding-orientation-independent — both the
+  numerator and denominator flip sign together on a global winding flip.
+
+`MeshCentroidReport` also surfaces `triangles_summed`, `total_area`
+(matching `mesh_surface_area` for an all-finite scene), `signed_volume`
+(matching `mesh_volume`), and `had_non_finite`. Both moments accumulate
+in `f64`; a facet with a non-finite corner is excluded from both (and
+sets `had_non_finite`) while still counting toward `triangles_summed`.
+Non-`Triangles` primitives are skipped.
+
 `repair_weld_vertices` only mutates `prim.positions` /
 `prim.normals` / `prim.indices` on `Triangles` primitives;
 `prim.extras`, `mesh.name`, and the scene-graph `nodes` / `roots`

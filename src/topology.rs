@@ -3522,6 +3522,182 @@ pub fn mesh_edge_length_stats(scene: &Scene3D) -> EdgeLengthStatsReport {
     report
 }
 
+/// Outcome of a [`mesh_centroid`] pass.
+///
+/// Slicer / additive-manufacturing pipelines centre a part on the build
+/// plate before printing — the spec's positive-octant and ascending-z
+/// recommendations are both about build-plate placement, and the
+/// centroid is the quantity those workflows actually translate by. This
+/// report carries **two** centroids because STL meshes are routinely
+/// open (a scan, an un-capped surface) as well as closed:
+///
+/// - The **area-weighted surface centroid** is the area-weighted mean of
+///   every facet's barycentre. It is well-defined for any non-empty
+///   surface — open or closed — and is the natural "centre of the
+///   sheet" for a non-watertight mesh.
+/// - The **volume-weighted centroid** (centre of mass of the enclosed
+///   solid, assuming uniform density) is the divergence-theorem moment
+///   `Σ (signed-tet-volume · tet-centroid) / Σ signed-tet-volume`, each
+///   tetrahedron spanning the origin and one facet. It is only a true
+///   centre of mass for a **closed** surface (the same watertightness
+///   precondition [`mesh_volume`] documents); on an open mesh the value
+///   depends on where the origin sits and is not meaningful.
+///
+/// Both are accumulated in `f64` (corners promoted from `f32` first) so
+/// a million-facet mesh keeps full precision. Non-`Triangles` primitives
+/// are skipped. A facet with a non-finite corner sets
+/// [`Self::had_non_finite`] and is excluded from both accumulations,
+/// while still counting toward [`Self::triangles_summed`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeshCentroidReport {
+    /// Number of triangle facets walked across every `Triangles`
+    /// primitive in the scene (post-index-buffer resolution).
+    pub triangles_summed: usize,
+    /// Total surface area `Σ ½·|(v1−v0) × (v2−v0)|` over finite facets —
+    /// the weight denominator of the area-weighted centroid. Matches
+    /// [`mesh_surface_area`]'s `total_area` for an all-finite scene.
+    pub total_area: f64,
+    /// Signed enclosed volume `Σ (v0 · (v1 × v2)) / 6` over finite
+    /// facets — the weight denominator of the volume-weighted centroid.
+    /// Matches [`mesh_volume`]'s `signed_volume` for an all-finite scene.
+    pub signed_volume: f64,
+    /// Whether any corner coordinate walked was non-finite (NaN or ±∞).
+    /// When `true`, the offending facets were excluded from both
+    /// accumulations.
+    pub had_non_finite: bool,
+    // Internal weighted-moment accumulators; read via the helpers.
+    area_moment: [f64; 3],
+    volume_moment: [f64; 3],
+}
+
+impl MeshCentroidReport {
+    /// Area-weighted surface centroid — `Σ (area · barycentre) / Σ area`.
+    /// `None` when the total area is zero (an empty scene, or a scene of
+    /// only degenerate / non-`Triangles` facets) since the weighted mean
+    /// is then undefined. Well-defined for an open surface.
+    pub fn area_centroid(&self) -> Option<[f64; 3]> {
+        if self.total_area > 0.0 && self.total_area.is_finite() {
+            Some([
+                self.area_moment[0] / self.total_area,
+                self.area_moment[1] / self.total_area,
+                self.area_moment[2] / self.total_area,
+            ])
+        } else {
+            None
+        }
+    }
+
+    /// Volume-weighted centroid (centre of mass of the enclosed solid,
+    /// uniform density) — `Σ (tet-volume · tet-centroid) / Σ tet-volume`.
+    /// `None` when the signed volume is zero or non-finite. This is only
+    /// a true centre of mass for a **closed** mesh; gate reading it on
+    /// watertightness (see [`mesh_volume`]). The result is independent of
+    /// winding orientation (both numerator and denominator flip sign
+    /// together on a global winding flip).
+    pub fn volume_centroid(&self) -> Option<[f64; 3]> {
+        if self.signed_volume != 0.0 && self.signed_volume.is_finite() {
+            Some([
+                self.volume_moment[0] / self.signed_volume,
+                self.volume_moment[1] / self.signed_volume,
+                self.volume_moment[2] / self.signed_volume,
+            ])
+        } else {
+            None
+        }
+    }
+}
+
+/// Compute the area-weighted surface centroid and the volume-weighted
+/// centre of mass of `scene` without mutating it.
+///
+/// See [`MeshCentroidReport`] for which centroid to read when: the
+/// area-weighted one is well-defined for any non-empty surface (open or
+/// closed); the volume-weighted one is a true centre of mass only for a
+/// **closed** mesh. Both accumulate in `f64`; non-finite-corner facets
+/// are excluded from the moments (and flag
+/// [`MeshCentroidReport::had_non_finite`]) but still count toward
+/// `triangles_summed`. Non-`Triangles` primitives are skipped, matching
+/// the rest of this module.
+pub fn mesh_centroid(scene: &Scene3D) -> MeshCentroidReport {
+    let mut report = MeshCentroidReport::default();
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            for face_idx in 0..face_count {
+                let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+                let v0 = match prim.positions.get(vi0) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v1 = match prim.positions.get(vi1) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v2 = match prim.positions.get(vi2) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                report.triangles_summed += 1;
+                let a = [v0[0] as f64, v0[1] as f64, v0[2] as f64];
+                let b = [v1[0] as f64, v1[1] as f64, v1[2] as f64];
+                let c = [v2[0] as f64, v2[1] as f64, v2[2] as f64];
+                if !(a.iter().all(|x| x.is_finite())
+                    && b.iter().all(|x| x.is_finite())
+                    && c.iter().all(|x| x.is_finite()))
+                {
+                    report.had_non_finite = true;
+                    continue;
+                }
+                // Facet area (magnitude of ½·cross) and barycentre.
+                let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let cross = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                let area =
+                    0.5 * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+                let bary = [
+                    (a[0] + b[0] + c[0]) / 3.0,
+                    (a[1] + b[1] + c[1]) / 3.0,
+                    (a[2] + b[2] + c[2]) / 3.0,
+                ];
+                report.total_area += area;
+                report.area_moment[0] += area * bary[0];
+                report.area_moment[1] += area * bary[1];
+                report.area_moment[2] += area * bary[2];
+
+                // Signed tetrahedron volume (origin, a, b, c) and its
+                // centroid (origin + a + b + c)/4.
+                let tet_cross = [
+                    b[1] * c[2] - b[2] * c[1],
+                    b[2] * c[0] - b[0] * c[2],
+                    b[0] * c[1] - b[1] * c[0],
+                ];
+                let tet_vol =
+                    (a[0] * tet_cross[0] + a[1] * tet_cross[1] + a[2] * tet_cross[2]) / 6.0;
+                let tet_centroid = [
+                    (a[0] + b[0] + c[0]) / 4.0,
+                    (a[1] + b[1] + c[1]) / 4.0,
+                    (a[2] + b[2] + c[2]) / 4.0,
+                ];
+                report.signed_volume += tet_vol;
+                report.volume_moment[0] += tet_vol * tet_centroid[0];
+                report.volume_moment[1] += tet_vol * tet_centroid[1];
+                report.volume_moment[2] += tet_vol * tet_centroid[2];
+            }
+        }
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3775,6 +3951,116 @@ mod tests {
         assert_eq!(r, EdgeLengthStatsReport::default());
         assert_eq!(r.mean_edge_length(), None);
         assert_eq!(r.edge_length_spread(), None);
+    }
+
+    fn approx3(a: [f64; 3], b: [f64; 3], eps: f64) -> bool {
+        (a[0] - b[0]).abs() < eps && (a[1] - b[1]).abs() < eps && (a[2] - b[2]).abs() < eps
+    }
+
+    #[test]
+    fn centroid_unit_cube_soup_centred_at_half() {
+        // The [0,1]³ cube — both centroids sit at its centre (0.5,0.5,0.5).
+        let scene = scene_with_primitives(vec![unit_cube_soup_primitive()]);
+        let r = mesh_centroid(&scene);
+        assert_eq!(r.triangles_summed, 12);
+        assert!(!r.had_non_finite);
+        assert!((r.signed_volume - 1.0).abs() < 1e-9);
+        assert!((r.total_area - 6.0).abs() < 1e-9);
+        assert!(approx3(r.area_centroid().unwrap(), [0.5, 0.5, 0.5], 1e-9));
+        assert!(approx3(r.volume_centroid().unwrap(), [0.5, 0.5, 0.5], 1e-9));
+    }
+
+    #[test]
+    fn centroid_translated_cube_shifts_with_geometry() {
+        // Shift the cube by (10, 20, 30): both centroids shift to
+        // (10.5, 20.5, 30.5).
+        let mut prim = unit_cube_soup_primitive();
+        for p in &mut prim.positions {
+            p[0] += 10.0;
+            p[1] += 20.0;
+            p[2] += 30.0;
+        }
+        let scene = scene_with_primitives(vec![prim]);
+        let r = mesh_centroid(&scene);
+        assert!(approx3(
+            r.area_centroid().unwrap(),
+            [10.5, 20.5, 30.5],
+            1e-4
+        ));
+        assert!(approx3(
+            r.volume_centroid().unwrap(),
+            [10.5, 20.5, 30.5],
+            1e-4
+        ));
+    }
+
+    #[test]
+    fn centroid_volume_invariant_under_winding_flip() {
+        // Reverse every facet (swap the last two corners). The signed
+        // volume flips sign but the volume centroid (a ratio of two
+        // sign-flipping accumulators) is unchanged.
+        let base = unit_cube_soup_primitive();
+        let r_base = mesh_centroid(&scene_with_primitives(vec![base.clone()]));
+
+        let mut flipped = base;
+        // For an unindexed soup, swap corners 1 and 2 of each face.
+        if flipped.indices.is_none() {
+            let n = flipped.positions.len();
+            let mut i = 0;
+            while i + 2 < n {
+                flipped.positions.swap(i + 1, i + 2);
+                i += 3;
+            }
+        }
+        let r_flip = mesh_centroid(&scene_with_primitives(vec![flipped]));
+        assert!((r_flip.signed_volume + r_base.signed_volume).abs() < 1e-9);
+        assert!(approx3(
+            r_flip.volume_centroid().unwrap(),
+            r_base.volume_centroid().unwrap(),
+            1e-9
+        ));
+    }
+
+    #[test]
+    fn centroid_open_sheet_has_area_but_no_volume() {
+        // A single right triangle: area centroid is its barycentre; the
+        // signed volume through the origin is zero (the triangle lies in
+        // the z=0 plane), so volume_centroid is None.
+        let scene = scene_with_primitives(vec![one_triangle([
+            [0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0],
+        ])]);
+        let r = mesh_centroid(&scene);
+        assert_eq!(r.triangles_summed, 1);
+        assert!((r.total_area - 4.5).abs() < 1e-9);
+        assert!(approx3(r.area_centroid().unwrap(), [1.0, 1.0, 0.0], 1e-9));
+        assert_eq!(r.volume_centroid(), None);
+    }
+
+    #[test]
+    fn centroid_non_finite_corner_excluded() {
+        let mut prim = unit_cube_soup_primitive();
+        prim.positions[0] = [f32::NAN, 0.0, 0.0];
+        let scene = scene_with_primitives(vec![prim]);
+        let r = mesh_centroid(&scene);
+        assert_eq!(r.triangles_summed, 12);
+        assert!(r.had_non_finite);
+        // The remaining finite facets still produce finite accumulators.
+        assert!(r.total_area.is_finite());
+    }
+
+    #[test]
+    fn centroid_empty_and_non_triangle() {
+        let r = mesh_centroid(&scene_with_primitives(vec![]));
+        assert_eq!(r.area_centroid(), None);
+        assert_eq!(r.volume_centroid(), None);
+
+        let mut prim = Primitive::new(Topology::Points);
+        prim.positions = vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let r = mesh_centroid(&scene_with_primitives(vec![prim]));
+        assert_eq!(r.triangles_summed, 0);
+        assert_eq!(r.area_centroid(), None);
     }
 
     #[test]

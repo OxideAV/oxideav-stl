@@ -29,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `topology::mesh_centroid` — non-mutating moment diagnostic reporting
+  the **area-weighted surface centroid** (`area_centroid()`, well-defined
+  for any non-empty surface, open or closed) and the **volume-weighted
+  centre of mass** (`volume_centroid()`, a true centre of mass only for a
+  closed mesh — the divergence-theorem moment, winding-orientation-
+  independent). The natural build-plate-centering companion to `bbox`.
+  `MeshCentroidReport` also surfaces `triangles_summed`, `total_area`
+  (matches `mesh_surface_area`), `signed_volume` (matches `mesh_volume`),
+  and `had_non_finite`. `f64` accumulation; non-finite-corner facets
+  excluded from both moments (still counted in `triangles_summed`);
+  non-`Triangles` primitives skipped. Covered by `tests/mesh_centroid.rs`
+  (6 integration tests) + 6 in-module unit tests, and wired into the
+  `repair` fuzz target.
+
 - `topology::mesh_edge_length_stats` — non-mutating triangle-side /
   facet-size diagnostic surfacing the 1989 spec's *"minimum length of
   triangle side"* and *"maximum triangle size"* data (described in the
