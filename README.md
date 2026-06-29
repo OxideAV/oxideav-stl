@@ -714,6 +714,59 @@ precision; degenerate facets (collinear / coincident corners) contribute
 `mesh_volume` it bounds the geometry — area without needing the mesh to
 be closed, volume once it is.
 
+### Triangle-side / facet-size extents (`mesh_edge_length_stats`)
+
+The 1989 spec notes the official 3D Systems StL document specifies data
+for the *"minimum length of triangle side"* and *"maximum triangle
+size"* (described there as "of dubious meaning", but documented).
+`oxideav_stl::mesh_edge_length_stats(&scene)` is the non-mutating
+diagnostic that materialises those two quantities — plus companions —
+straight from the geometry, so a producer or slicer pre-flight can
+reason about the facet-size distribution (the natural input to picking a
+weld / T-junction tolerance, or to estimating slice-layer count from the
+smallest feature):
+
+```rust
+use oxideav_stl::mesh_edge_length_stats;
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+let r = mesh_edge_length_stats(&scene);
+if let (Some(min), Some(max)) = (r.min_edge_length, r.max_edge_length) {
+    println!("triangle side: min {min} mm, max {max} mm over {} facets", r.triangles_summed);
+}
+if let Some(area) = r.max_face_area {
+    println!("largest facet area {area} mm² (\"maximum triangle size\")");
+}
+if let Some(spread) = r.edge_length_spread() {
+    println!("aspect spread {spread:.1}× — large ⇒ mixed fine/coarse facets");
+}
+```
+
+`EdgeLengthStatsReport` reports `triangles_summed`, `edges_summed`,
+`min_edge_length` / `max_edge_length` (the spec's "minimum length of
+triangle side" plus its maximum), `total_edge_length` (for the
+`mean_edge_length()` helper), `min_face_area` / `max_face_area` (the
+spec's "maximum triangle size" read as a facet area), `max_triangle_span`
+(the length-unit reading of "maximum triangle size" — equal by
+construction to `max_edge_length`, surfaced separately for clarity), and
+a `had_non_finite` flag. Two derived helpers: `mean_edge_length()`
+(`None` when no finite edge was summed) and `edge_length_spread()`
+(`max / min`, `None` when the minimum is zero — i.e. a soup containing a
+coincident-corner facet — so the ratio is never `Inf`).
+
+All extents are accumulated in `f64` (corners promoted from `f32` first)
+so a million-facet mesh keeps full precision. A facet with a non-finite
+corner sets `had_non_finite` and its non-finite side lengths / area are
+excluded from the running extrema, so the reported min/max stay
+trustworthy on a partly-corrupt scene while the facet still counts toward
+`triangles_summed`. Degenerate facets (coincident or collinear corners)
+are *not* skipped — a coincident-corner triangle has a zero-length side
+so `min_edge_length` becomes `0.0`, which is exactly the signal a
+weld-tolerance picker wants. Non-`Triangles` primitives are skipped,
+matching the rest of this module. Together with `mesh_surface_area` (the
+*total* area) and `mesh_volume` (the enclosed volume) it completes the
+scalar-geometry triad: per-facet extents, summed area, summed volume.
+
 `repair_weld_vertices` only mutates `prim.positions` /
 `prim.normals` / `prim.indices` on `Triangles` primitives;
 `prim.extras`, `mesh.name`, and the scene-graph `nodes` / `roots`

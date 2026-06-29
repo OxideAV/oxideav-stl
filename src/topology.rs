@@ -3289,6 +3289,239 @@ fn cap_boundary_loops_in_primitive(prim: &mut Primitive, report: &mut CapBoundar
     }
 }
 
+/// Outcome of a [`mesh_edge_length_stats`] pass.
+///
+/// The 1989 spec notes that the official 3D Systems StL document
+/// specifies data for the *"minimum length of triangle side"* and
+/// *"maximum triangle size"* (calling the numbers "of dubious
+/// meaning", but documenting their existence). This report is the
+/// non-mutating diagnostic that materialises those two quantities —
+/// plus their companions — directly from the geometry, so a producer
+/// or slicer pre-flight can reason about the facet-size distribution
+/// (the natural input to picking a weld / T-junction tolerance, or to
+/// estimating slice-layer count from the smallest feature).
+///
+/// All extents are accumulated in `f64` (corners promoted from `f32`
+/// first) so a million-facet mesh keeps full precision. Degenerate
+/// facets (coincident or collinear corners) contribute a zero-length
+/// side and/or zero area like any other facet; they are not skipped,
+/// so [`Self::min_edge_length`] of a soup that contains a coincident-
+/// corner triangle is `0.0`. Non-`Triangles` primitives are skipped,
+/// matching the rest of this module. A facet with a non-finite corner
+/// sets [`Self::had_non_finite`] and its non-finite extents are
+/// excluded from the min/max/mean running values, so the reported
+/// extrema stay trustworthy even on a partly-corrupt scene.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EdgeLengthStatsReport {
+    /// Number of triangle facets walked across every `Triangles`
+    /// primitive in the scene (post-index-buffer resolution).
+    /// Non-`Triangles` primitives contribute nothing.
+    pub triangles_summed: usize,
+    /// Number of individual triangle sides whose length was finite and
+    /// therefore folded into the edge-length extrema and mean. Three
+    /// per fully-finite facet; fewer when a corner is non-finite.
+    pub edges_summed: usize,
+    /// Smallest finite triangle-side length seen — the spec's
+    /// *"minimum length of triangle side"*. `None` when no finite edge
+    /// was summed (empty scene, or every facet had a non-finite
+    /// corner).
+    pub min_edge_length: Option<f64>,
+    /// Largest finite triangle-side length seen. `None` under the same
+    /// conditions as [`Self::min_edge_length`].
+    pub max_edge_length: Option<f64>,
+    /// Sum of every finite triangle-side length, for [`Self::mean_edge_length`].
+    pub total_edge_length: f64,
+    /// Smallest finite facet area (`½·|(v1−v0) × (v2−v0)|`). `None`
+    /// when no facet had three finite corners.
+    pub min_face_area: Option<f64>,
+    /// Largest finite facet area — the spec's *"maximum triangle
+    /// size"* read as a facet's area. `None` under the same condition
+    /// as [`Self::min_face_area`].
+    pub max_face_area: Option<f64>,
+    /// Largest finite facet *bounding-extent* — the maximum of the
+    /// three side lengths of the largest facet, a length-unit reading
+    /// of "maximum triangle size" for callers who want a span rather
+    /// than an area. Equal to [`Self::max_edge_length`] (the longest
+    /// side anywhere is necessarily the longest side of *some* facet),
+    /// surfaced separately for clarity. `None` under the same
+    /// condition as the other extrema.
+    pub max_triangle_span: Option<f64>,
+    /// Whether any corner coordinate walked was non-finite (NaN or
+    /// ±∞). When `true`, some facets were partially or wholly excluded
+    /// from the extrema; [`Self::triangles_summed`] still counts them.
+    pub had_non_finite: bool,
+}
+
+impl Default for EdgeLengthStatsReport {
+    fn default() -> Self {
+        EdgeLengthStatsReport {
+            triangles_summed: 0,
+            edges_summed: 0,
+            min_edge_length: None,
+            max_edge_length: None,
+            total_edge_length: 0.0,
+            min_face_area: None,
+            max_face_area: None,
+            max_triangle_span: None,
+            had_non_finite: false,
+        }
+    }
+}
+
+impl EdgeLengthStatsReport {
+    /// Mean triangle-side length — `total_edge_length / edges_summed`,
+    /// or `None` when no finite edge was summed. A scale hint for
+    /// picking a weld / T-junction tolerance proportional to the
+    /// typical side length rather than to facet area.
+    pub fn mean_edge_length(&self) -> Option<f64> {
+        if self.edges_summed == 0 {
+            None
+        } else {
+            Some(self.total_edge_length / self.edges_summed as f64)
+        }
+    }
+
+    /// Ratio of the largest finite side to the smallest finite side —
+    /// the *aspect spread* of the facet-size distribution. A large
+    /// value flags a mesh mixing very fine and very coarse facets
+    /// (e.g. an over-tessellated curved region next to a flat slab),
+    /// which is the producer pattern most likely to need a
+    /// per-feature, rather than global, weld tolerance. `None` when no
+    /// finite edge was summed; a finite ratio requires
+    /// `min_edge_length > 0.0` (a soup with a coincident-corner facet
+    /// has a zero-length side and so returns `None` here even though
+    /// the extrema themselves are `Some`).
+    pub fn edge_length_spread(&self) -> Option<f64> {
+        match (self.min_edge_length, self.max_edge_length) {
+            (Some(lo), Some(hi)) if lo > 0.0 => Some(hi / lo),
+            _ => None,
+        }
+    }
+}
+
+/// Compute triangle-side-length and facet-area extrema for `scene`
+/// without mutating it — the spec's *"minimum length of triangle
+/// side"* and *"maximum triangle size"* data, plus companions.
+///
+/// For every `Triangles` facet `(v0, v1, v2)` the three side lengths
+/// `|v1−v0|`, `|v2−v1|`, `|v0−v2|` feed the edge-length extrema and
+/// mean, and the facet area `½·|(v1−v0) × (v2−v0)|` feeds the
+/// area extrema. All arithmetic is in `f64` (corners promoted from
+/// `f32` first). Non-finite corners are tolerated: the affected
+/// extents are excluded from the running extrema and
+/// [`EdgeLengthStatsReport::had_non_finite`] is set, but the facet
+/// still counts toward [`EdgeLengthStatsReport::triangles_summed`].
+///
+/// This is a pure diagnostic — it never touches the scene and skips
+/// non-`Triangles` primitives, matching the rest of this module. An
+/// empty scene returns a report whose extrema are all `None` and whose
+/// counters are zero.
+pub fn mesh_edge_length_stats(scene: &Scene3D) -> EdgeLengthStatsReport {
+    let mut report = EdgeLengthStatsReport::default();
+    let fold_min = |slot: &mut Option<f64>, v: f64| {
+        *slot = Some(match *slot {
+            Some(cur) if cur <= v => cur,
+            _ => v,
+        });
+    };
+    let mut report_min_edge = report.min_edge_length;
+    let mut report_max_edge = report.max_edge_length;
+    let mut report_min_area = report.min_face_area;
+    let mut report_max_area = report.max_face_area;
+    let mut total_edge = 0.0_f64;
+    let mut edges_summed = 0usize;
+    let mut triangles_summed = 0usize;
+    let mut had_non_finite = false;
+
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            for face_idx in 0..face_count {
+                let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+                let v0 = match prim.positions.get(vi0) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v1 = match prim.positions.get(vi1) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v2 = match prim.positions.get(vi2) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                triangles_summed += 1;
+                let a = [v0[0] as f64, v0[1] as f64, v0[2] as f64];
+                let b = [v1[0] as f64, v1[1] as f64, v1[2] as f64];
+                let c = [v2[0] as f64, v2[1] as f64, v2[2] as f64];
+                let all_finite = a.iter().all(|x| x.is_finite())
+                    && b.iter().all(|x| x.is_finite())
+                    && c.iter().all(|x| x.is_finite());
+                if !all_finite {
+                    had_non_finite = true;
+                }
+                // Three side lengths.
+                let side = |p: [f64; 3], q: [f64; 3]| -> f64 {
+                    let d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                };
+                for len in [side(a, b), side(b, c), side(c, a)] {
+                    if len.is_finite() {
+                        edges_summed += 1;
+                        total_edge += len;
+                        fold_min(&mut report_min_edge, len);
+                        report_max_edge = Some(match report_max_edge {
+                            Some(cur) if cur >= len => cur,
+                            _ => len,
+                        });
+                    }
+                }
+                // Facet area from the cross product (only when all
+                // three corners are finite, else the area is
+                // ill-defined).
+                if all_finite {
+                    let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                    let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                    let cross = [
+                        e1[1] * e2[2] - e1[2] * e2[1],
+                        e1[2] * e2[0] - e1[0] * e2[2],
+                        e1[0] * e2[1] - e1[1] * e2[0],
+                    ];
+                    let area = 0.5
+                        * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+                    if area.is_finite() {
+                        fold_min(&mut report_min_area, area);
+                        report_max_area = Some(match report_max_area {
+                            Some(cur) if cur >= area => cur,
+                            _ => area,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    report.triangles_summed = triangles_summed;
+    report.edges_summed = edges_summed;
+    report.min_edge_length = report_min_edge;
+    report.max_edge_length = report_max_edge;
+    report.total_edge_length = total_edge;
+    report.min_face_area = report_min_area;
+    report.max_face_area = report_max_area;
+    // The longest side of the whole mesh is the longest side of some
+    // facet, so the length-unit "maximum triangle size" equals the
+    // max edge length.
+    report.max_triangle_span = report_max_edge;
+    report.had_non_finite = had_non_finite;
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3464,6 +3697,84 @@ mod tests {
         let r = mesh_surface_area(&scene);
         assert_eq!(r.triangles_summed, 1);
         assert!((r.total_area - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn edge_length_stats_3_4_5_triangle() {
+        // 3-4-5 right triangle: sides 3, 5, 4; area 6.
+        let scene = scene_with_primitives(vec![one_triangle([
+            [0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [0.0, 4.0, 0.0],
+        ])]);
+        let r = mesh_edge_length_stats(&scene);
+        assert_eq!(r.triangles_summed, 1);
+        assert_eq!(r.edges_summed, 3);
+        assert!(!r.had_non_finite);
+        assert!((r.min_edge_length.unwrap() - 3.0).abs() < 1e-9);
+        assert!((r.max_edge_length.unwrap() - 5.0).abs() < 1e-9);
+        assert_eq!(r.max_triangle_span, r.max_edge_length);
+        assert!((r.mean_edge_length().unwrap() - 4.0).abs() < 1e-9);
+        assert!((r.min_face_area.unwrap() - 6.0).abs() < 1e-9);
+        assert!((r.max_face_area.unwrap() - 6.0).abs() < 1e-9);
+        assert!((r.edge_length_spread().unwrap() - 5.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn edge_length_stats_unit_cube_soup() {
+        // Cube edges are length 1 (axis-aligned) or √2 (face diagonals);
+        // every face is a ½-area right triangle.
+        let scene = scene_with_primitives(vec![unit_cube_soup_primitive()]);
+        let r = mesh_edge_length_stats(&scene);
+        assert_eq!(r.triangles_summed, 12);
+        assert_eq!(r.edges_summed, 36);
+        assert!((r.min_edge_length.unwrap() - 1.0).abs() < 1e-9);
+        assert!((r.max_edge_length.unwrap() - 2f64.sqrt()).abs() < 1e-6);
+        assert!((r.min_face_area.unwrap() - 0.5).abs() < 1e-9);
+        assert!((r.max_face_area.unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn edge_length_stats_non_finite_excluded_from_extrema() {
+        // One corner is +∞: the two sides touching it become non-finite
+        // and are excluded; the finite opposite side still counts, and
+        // had_non_finite is set.
+        let scene = scene_with_primitives(vec![one_triangle([
+            [f32::INFINITY, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+        ])]);
+        let r = mesh_edge_length_stats(&scene);
+        assert_eq!(r.triangles_summed, 1);
+        // Only the (0,0,0)→(4,0,0) side is finite.
+        assert_eq!(r.edges_summed, 1);
+        assert!(r.had_non_finite);
+        assert!((r.min_edge_length.unwrap() - 4.0).abs() < 1e-9);
+        assert!((r.max_edge_length.unwrap() - 4.0).abs() < 1e-9);
+        // Area is ill-defined (non-finite corner) ⇒ no area extrema.
+        assert_eq!(r.min_face_area, None);
+        assert_eq!(r.max_face_area, None);
+    }
+
+    #[test]
+    fn edge_length_stats_skips_non_triangle_primitives() {
+        let mut prim = Primitive::new(Topology::Points);
+        prim.positions = vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let scene = scene_with_primitives(vec![prim]);
+        let r = mesh_edge_length_stats(&scene);
+        assert_eq!(r.triangles_summed, 0);
+        assert_eq!(r.edges_summed, 0);
+        assert_eq!(r.min_edge_length, None);
+        assert_eq!(r.mean_edge_length(), None);
+    }
+
+    #[test]
+    fn edge_length_stats_empty_scene() {
+        let scene = scene_with_primitives(vec![]);
+        let r = mesh_edge_length_stats(&scene);
+        assert_eq!(r, EdgeLengthStatsReport::default());
+        assert_eq!(r.mean_edge_length(), None);
+        assert_eq!(r.edge_length_spread(), None);
     }
 
     #[test]

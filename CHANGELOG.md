@@ -29,6 +29,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `topology::mesh_edge_length_stats` — non-mutating triangle-side /
+  facet-size diagnostic surfacing the 1989 spec's *"minimum length of
+  triangle side"* and *"maximum triangle size"* data (described in the
+  spec as "of dubious meaning" but documented). Reports
+  `min_edge_length` / `max_edge_length`, `min_face_area` /
+  `max_face_area`, `max_triangle_span`, `triangles_summed` /
+  `edges_summed`, and `had_non_finite`, with derived `mean_edge_length()`
+  and `edge_length_spread()` (`max/min`, `None` on a zero minimum so the
+  ratio is never `Inf`). `f64` accumulation; non-finite corners excluded
+  from the extrema (the facet still counts toward `triangles_summed`);
+  degenerate facets contribute a zero-length side (so `min_edge_length`
+  becomes `0.0`); non-`Triangles` primitives skipped. Completes the
+  scalar-geometry triad alongside `mesh_surface_area` and `mesh_volume`.
+  Covered by `tests/mesh_edge_length_stats.rs` (7 integration tests) +
+  5 in-module unit tests, and wired into the `repair` fuzz target's
+  non-mutating analysis section (which also picked up the previously-
+  unfuzzed `mesh_volume` / `mesh_surface_area` / `check_z_sorted`
+  diagnostics in the same pass).
+
 - `fuzz/fuzz_targets/encode.rs` — new cargo-fuzz target driving the
   **encoder** + dedup / stats surface on a hostile fuzz-built
   `Scene3D`, a surface the existing targets never fed an arbitrary
