@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tests/property_roundtrip.rs` geometry-diagnostic invariants — three
+  new deterministic property tests over the existing seeded LCG sweep:
+  `mesh_surface_area` + `mesh_edge_length_stats` are translation-
+  invariant, the `mesh_centroid` area centroid is translation-
+  equivariant, and `mesh_volume`'s signed volume scales by `k³` under a
+  uniform `k` scale. Pins the positive mathematical contracts the
+  `repair` fuzz target only checks for panic-freedom.
+
 - `benches/geometry.rs` — fifth Criterion suite benchmarking the four
   non-mutating scalar-geometry diagnostics (`mesh_volume`,
   `mesh_surface_area`, `mesh_edge_length_stats`, `mesh_centroid`) at

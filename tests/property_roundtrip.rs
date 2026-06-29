@@ -34,6 +34,12 @@
 //!   decoded, ASCII-encoded, re-decoded, and binary-encoded preserves
 //!   the per-vertex positions within tolerance (the ASCII hop loses the
 //!   exact bit pattern to decimal formatting but not the value).
+//! * **Geometry-diagnostic invariants** — `mesh_surface_area` and
+//!   `mesh_edge_length_stats` are translation-invariant; the
+//!   `mesh_centroid` area centroid is translation-equivariant; and
+//!   `mesh_volume`'s signed volume scales by `k³` under a uniform `k`
+//!   scale. These pin the positive mathematical contracts the `repair`
+//!   fuzz target only checks for panic-freedom.
 
 use oxideav_mesh3d::{Mesh3DDecoder, Mesh3DEncoder};
 use oxideav_stl::{StlDecoder, StlEncoder};
@@ -358,5 +364,147 @@ fn ascii_text_roundtrip_preserves_geometry_over_random_inputs() {
             facets,
             "re-encode count (seed={seed})"
         );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Geometry-diagnostic invariants over the random sweep.
+//
+// These pin the *positive* mathematical contracts of the non-mutating
+// scalar-geometry diagnostics (mesh_surface_area, mesh_edge_length_stats,
+// mesh_centroid, mesh_volume) the `repair` fuzz target only checks for
+// panic-freedom: translation-invariance of size measures, translation-
+// equivariance of the area centroid, and uniform-scale laws. Every case
+// is reproducible from its printed seed.
+// ---------------------------------------------------------------------
+
+use oxideav_stl::{mesh_centroid, mesh_edge_length_stats, mesh_surface_area, mesh_volume};
+
+/// Build a finite-coordinate scene, then translate every vertex by
+/// `delta`, returning a fresh binary STL. Reuses the finite synth so the
+/// coordinates are well-behaved (no NaN/Inf).
+fn synth_binary_finite_translated(rng: &mut Rng, triangles: usize, delta: [f32; 3]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(PREFIX_BYTES + triangles * TRIANGLE_BYTES);
+    let mut header = [b' '; HEADER_BYTES];
+    header[..4].copy_from_slice(b"trsl");
+    buf.extend_from_slice(&header);
+    buf.extend_from_slice(&(triangles as u32).to_le_bytes());
+    for _ in 0..triangles {
+        // normal (unchanged direction) — emit raw finite, not shifted.
+        for _ in 0..3 {
+            buf.extend_from_slice(&rng.finite_coord().to_le_bytes());
+        }
+        // three vertices, each shifted by delta.
+        for _ in 0..3 {
+            for &d in &delta {
+                let v = rng.finite_coord() + d;
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        buf.extend_from_slice(&0u16.to_le_bytes());
+    }
+    buf
+}
+
+#[test]
+fn surface_area_and_edge_stats_are_translation_invariant() {
+    let counts = [1usize, 2, 5, 13, 40];
+    for &count in &counts {
+        for seed in 0..20u64 {
+            // Same RNG stream produces the same base geometry for both
+            // the un-shifted and shifted builds.
+            let base_seed = seed.wrapping_mul(99991).wrapping_add(count as u64);
+            let mut rng_a = Rng::new(base_seed);
+            let bytes_a = synth_binary_finite_translated(&mut rng_a, count, [0.0, 0.0, 0.0]);
+            let mut rng_b = Rng::new(base_seed);
+            let delta = [123.5f32, -67.25, 8.75];
+            let bytes_b = synth_binary_finite_translated(&mut rng_b, count, delta);
+
+            let sa = mesh_surface_area(&StlDecoder::new().decode(&bytes_a).unwrap());
+            let sb = mesh_surface_area(&StlDecoder::new().decode(&bytes_b).unwrap());
+            // Areas are translation-invariant up to f32 magnitude noise.
+            let tol = 1e-2 * (1.0 + sa.total_area.abs());
+            assert!(
+                (sa.total_area - sb.total_area).abs() <= tol,
+                "area translation-invariance (count={count} seed={seed}): {} vs {}",
+                sa.total_area,
+                sb.total_area
+            );
+
+            let ea = mesh_edge_length_stats(&StlDecoder::new().decode(&bytes_a).unwrap());
+            let eb = mesh_edge_length_stats(&StlDecoder::new().decode(&bytes_b).unwrap());
+            assert_eq!(ea.triangles_summed, eb.triangles_summed);
+            if let (Some(ma), Some(mb)) = (ea.max_edge_length, eb.max_edge_length) {
+                let etol = 1e-2 * (1.0 + ma.abs());
+                assert!(
+                    (ma - mb).abs() <= etol,
+                    "max edge translation-invariance (count={count} seed={seed}): {ma} vs {mb}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn area_centroid_is_translation_equivariant() {
+    for seed in 0..25u64 {
+        let count = 1 + (seed % 30) as usize;
+        let base_seed = seed.wrapping_mul(40503).wrapping_add(7);
+        let mut rng_a = Rng::new(base_seed);
+        let a = synth_binary_finite_translated(&mut rng_a, count, [0.0, 0.0, 0.0]);
+        let delta = [50.0f32, -30.0, 12.0];
+        let mut rng_b = Rng::new(base_seed);
+        let b = synth_binary_finite_translated(&mut rng_b, count, delta);
+
+        let ca = mesh_centroid(&StlDecoder::new().decode(&a).unwrap());
+        let cb = mesh_centroid(&StlDecoder::new().decode(&b).unwrap());
+        // Skip when the un-shifted scene is fully degenerate (no area).
+        if let (Some(pa), Some(pb)) = (ca.area_centroid(), cb.area_centroid()) {
+            for axis in 0..3 {
+                let expect = pa[axis] + delta[axis] as f64;
+                let tol = 1e-1 * (1.0 + expect.abs());
+                assert!(
+                    (pb[axis] - expect).abs() <= tol,
+                    "area centroid equivariance (seed={seed} axis={axis}): {} vs {}",
+                    pb[axis],
+                    expect
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn volume_scales_with_cube_of_linear_factor() {
+    // Scaling every coordinate by k multiplies the signed volume by k³.
+    for seed in 0..20u64 {
+        let count = 1 + (seed % 24) as usize;
+        let mut rng = Rng::new(seed.wrapping_mul(2246822519));
+        let base = synth_binary_finite(&mut rng, count);
+        let v1 = mesh_volume(&StlDecoder::new().decode(&base).unwrap());
+
+        // Rebuild scaled: decode, scale positions, re-encode.
+        let mut scene = StlDecoder::new().decode(&base).unwrap();
+        let k = 3.0f32;
+        for mesh in &mut scene.meshes {
+            for prim in &mut mesh.primitives {
+                for p in &mut prim.positions {
+                    p[0] *= k;
+                    p[1] *= k;
+                    p[2] *= k;
+                }
+            }
+        }
+        let v2 = mesh_volume(&scene);
+        if v1.signed_volume.abs() > 1.0 && v1.signed_volume.is_finite() {
+            let expected = v1.signed_volume * (k as f64).powi(3);
+            let tol = 1e-2 * (1.0 + expected.abs());
+            assert!(
+                (v2.signed_volume - expected).abs() <= tol,
+                "volume scales by k³ (seed={seed}): {} vs {}",
+                v2.signed_volume,
+                expected
+            );
+        }
     }
 }
