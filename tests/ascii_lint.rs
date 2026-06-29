@@ -116,6 +116,7 @@ fn findings_by_rule_sums_to_total_with_stable_labels() {
             "extra_solid_block",
             "leading_bom",
             "empty_solid_block",
+            "solid_name_mismatch",
         ]
     );
     let sum: usize = by_rule.iter().map(|(_, c)| c).sum();
@@ -249,4 +250,29 @@ fn encoder_output_lints_clean_after_octant_repair() {
     let rep = lint_ascii(&out).unwrap();
     assert!(rep.is_strict_spec(), "{rep:?}");
     assert_eq!(rep.triangles_walked, 1);
+}
+
+#[test]
+fn solid_endsolid_name_mismatch_is_a_finding() {
+    // The spec pairs `solid <name>` with `endsolid <name>` (same name);
+    // the decoder ignores the closing name. A disagreement is rule 8.
+    let s = STRICT.replace("endsolid part", "endsolid other");
+    let rep = lint_ascii(s.as_bytes()).unwrap();
+    assert_eq!(rep.solid_name_mismatches, 1);
+    assert_eq!(rep.solid_name_mismatch_examples[0].token, "part");
+    assert!(!rep.is_strict_spec());
+    // The decoder still accepts it (lint never fails where decode
+    // succeeds) — re-running through the encoder's own output, which
+    // echoes the name on both lines, lints clean for this rule.
+    assert_eq!(
+        lint_ascii(STRICT.as_bytes()).unwrap().solid_name_mismatches,
+        0
+    );
+}
+
+#[test]
+fn named_open_bare_close_counts_as_mismatch() {
+    let s = STRICT.replace("endsolid part", "endsolid");
+    let rep = lint_ascii(s.as_bytes()).unwrap();
+    assert_eq!(rep.solid_name_mismatches, 1);
 }

@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `lint::lint_ascii` rule 8 — **`solid` / `endsolid` name mismatch**.
+  The 1989 spec grammar pairs `solid <name>` with `endsolid <name>`
+  carrying the same name; the decoder consumes the closing name without
+  checking it. The lint now flags every block whose opening and closing
+  names disagree under `AsciiLintReport::solid_name_mismatches` (with
+  capped `solid_name_mismatch_examples`, the `token` being the opening
+  name so a reader sees what the closing line should echo). Names are
+  compared after whitespace-trimming; a named-vs-bare pair counts, two
+  bare lines do not. `findings_by_rule()` grows from 7 to 8 stable
+  labels (`solid_name_mismatch` added). 6 in-module + 2 integration
+  tests.
+
 - `topology::mesh_centroid` — non-mutating moment diagnostic reporting
   the **area-weighted surface centroid** (`area_centroid()`, well-defined
   for any non-empty surface, open or closed) and the **volume-weighted

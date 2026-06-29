@@ -1286,7 +1286,7 @@ recording every place the file leans on a tolerance the strict 1989
 spec letter does not grant. The ASCII counterpart of
 `inspect_binary_header`, for pipelines that must emit (or demand)
 letter-strict files while still reading the tolerant real-world
-dialect. Seven rules, each grounded in the spec's §6.5.2 prose:
+dialect. Eight rules, each grounded in the spec's §6.5.2 prose:
 
 | Rule | Spec basis | Report field |
 | ---- | ---------- | ------------ |
@@ -1297,6 +1297,7 @@ dialect. Seven rules, each grounded in the spec's §6.5.2 prose:
 | Multi-`solid` | spec grammar describes one block per file | `extra_solid_blocks` |
 | Leading BOM | the format is ASCII | `leading_bom` |
 | Empty `solid` | grammar repeats the facet body with `{…}`+ (one or more) | `empty_solid_blocks` |
+| `solid`/`endsolid` name | grammar pairs `solid <name>` with `endsolid <name>` (same name) | `solid_name_mismatches` (+ examples) |
 
 ```rust
 use oxideav_stl::lint_ascii;
@@ -1318,10 +1319,12 @@ if !rep.is_strict_spec() {
 # }
 ```
 
-Counts are always complete; the keyword-case and vertex-sign rules
-additionally carry capped (`MAX_REPORTED_LINT_FINDINGS` = 32)
-illustrative `AsciiLintFinding { line, token }` lists with 1-based
-line numbers and verbatim tokens. `is_strict_spec()` /
+Counts are always complete; the keyword-case, vertex-sign, and
+`solid`/`endsolid`-name rules additionally carry capped
+(`MAX_REPORTED_LINT_FINDINGS` = 32) illustrative `AsciiLintFinding {
+line, token }` lists with 1-based line numbers and verbatim tokens (the
+name-mismatch example's `token` is the *opening* `solid` name, so a
+reader sees what the closing line should have echoed). `is_strict_spec()` /
 `finding_total()` / `findings_by_rule()` mirror the validate module's
 report ergonomics. The vertex-sign rule is the lexical face of the
 geometric all-positive-octant rule: the crate's own ASCII encoder

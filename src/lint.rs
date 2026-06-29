@@ -50,9 +50,18 @@
 //!    *zero* facets therefore violates the strict grammar even though
 //!    the decoder accepts it (and yields an empty mesh). Each such
 //!    block is counted under [`AsciiLintReport::empty_solid_blocks`].
+//! 8. **`solid` / `endsolid` name mismatch** — the spec grammar pairs
+//!    `solid <name>` with `endsolid <name>` carrying the *same* name.
+//!    The decoder consumes the `endsolid` name without checking it
+//!    against the opening `solid` name; the lint counts every block
+//!    whose two names disagree (after trimming surrounding whitespace)
+//!    under [`AsciiLintReport::solid_name_mismatches`]. A block where
+//!    one side names the solid and the other is bare (no name) also
+//!    counts — the spec shows the name on both lines. Two bare lines
+//!    (`solid` … `endsolid`, no name either side) is *not* a mismatch.
 //!
 //! A report with [`AsciiLintReport::is_strict_spec`] `== true`
-//! certifies the input uses none of the six tolerances. The crate's
+//! certifies the input uses none of the eight tolerances. The crate's
 //! own ASCII encoder emits lower-case keywords, space indentation, no
 //! comments, and no BOM, so its output lints clean except where the
 //! *geometry* forces rule 3 (negative coordinates) or the *scene*
@@ -115,10 +124,22 @@ pub struct AsciiLintReport {
     /// per block; the decoder still accepts an empty block (yielding
     /// an empty mesh), but it is not strict-spec.
     pub empty_solid_blocks: usize,
+    /// `solid … endsolid` blocks whose opening and closing names
+    /// disagree (rule 8). The spec grammar repeats the same `<name>`
+    /// on both lines; the decoder consumes the `endsolid` name without
+    /// checking it. Names are compared after trimming surrounding
+    /// whitespace; a named-vs-bare pair counts, two bare lines do not.
+    pub solid_name_mismatches: usize,
+    /// Up to [`MAX_REPORTED_LINT_FINDINGS`] illustrative rule-8
+    /// findings. The `line` is the `endsolid` line; the `token` is the
+    /// opening-`solid` name (or the empty string when the open line was
+    /// bare), so a reader can see what name the closing line should
+    /// have echoed.
+    pub solid_name_mismatch_examples: Vec<AsciiLintFinding>,
 }
 
 impl AsciiLintReport {
-    /// `true` iff the file uses none of the six tolerances — i.e. it
+    /// `true` iff the file uses none of the eight tolerances — i.e. it
     /// conforms to the strict letter of the 1989 spec's ASCII grammar
     /// as far as this lint checks. Equivalent to
     /// `finding_total() == 0`.
@@ -137,11 +158,12 @@ impl AsciiLintReport {
             + self.extra_solid_blocks
             + usize::from(self.leading_bom)
             + self.empty_solid_blocks
+            + self.solid_name_mismatches
     }
 
-    /// Labeled per-rule breakdown — seven stable string keys safe to
+    /// Labeled per-rule breakdown — eight stable string keys safe to
     /// use as metric names. Sums exactly to [`Self::finding_total`].
-    pub fn findings_by_rule(&self) -> [(&'static str, usize); 7] {
+    pub fn findings_by_rule(&self) -> [(&'static str, usize); 8] {
         [
             ("keyword_case", self.keyword_case_defects),
             ("tab_indentation", self.tab_indented_lines),
@@ -153,6 +175,7 @@ impl AsciiLintReport {
             ("extra_solid_block", self.extra_solid_blocks),
             ("leading_bom", usize::from(self.leading_bom)),
             ("empty_solid_block", self.empty_solid_blocks),
+            ("solid_name_mismatch", self.solid_name_mismatches),
         ]
     }
 }
@@ -218,14 +241,29 @@ pub fn lint_ascii(bytes: &[u8]) -> Result<AsciiLintReport> {
             )));
         }
         w.expect_keyword("solid")?;
-        w.skip_line_remainder();
+        let solid_name = w.read_line_remainder();
 
         let mut facets_in_block = 0usize;
         loop {
             w.skip_ws();
             if w.peek_keyword_eq("endsolid") {
                 w.expect_keyword("endsolid")?;
-                w.skip_line_remainder();
+                let endsolid_line = w.line;
+                let endsolid_name = w.read_line_remainder();
+                // Rule 8: the spec pairs `solid <name>` with
+                // `endsolid <name>` carrying the same name. Two bare
+                // lines are fine; any other disagreement is a mismatch.
+                if solid_name != endsolid_name {
+                    w.report.solid_name_mismatches += 1;
+                    if w.report.solid_name_mismatch_examples.len() < MAX_REPORTED_LINT_FINDINGS {
+                        w.report
+                            .solid_name_mismatch_examples
+                            .push(AsciiLintFinding {
+                                line: endsolid_line,
+                                token: solid_name.clone(),
+                            });
+                    }
+                }
                 break;
             }
             w.expect_keyword("facet")?;
@@ -401,13 +439,18 @@ impl Walker<'_> {
         Ok(())
     }
 
-    /// Skip the rest of the current line (the optional `<name>` after
-    /// `solid` / `endsolid`), preserving the newline for `skip_ws`.
-    fn skip_line_remainder(&mut self) {
+    /// Read the rest of the current line (the optional `<name>` after
+    /// `solid` / `endsolid`) and return it trimmed of surrounding ASCII
+    /// whitespace, preserving the newline for `skip_ws`. An empty or
+    /// whitespace-only remainder returns the empty string. Used by
+    /// rule 8 to compare the opening and closing names.
+    fn read_line_remainder(&mut self) -> String {
         let bytes = self.src.as_bytes();
+        let start = self.pos;
         while self.pos < bytes.len() && bytes[self.pos] != b'\n' && bytes[self.pos] != b'\r' {
             self.pos += 1;
         }
+        self.src[start..self.pos].trim().to_string()
     }
 }
 
@@ -478,5 +521,67 @@ mod tests {
         assert_eq!(rep.solid_blocks, 1);
         assert!(!rep.is_strict_spec());
         assert_eq!(rep.finding_total(), 1);
+    }
+
+    #[test]
+    fn matching_solid_endsolid_names_lint_clean() {
+        // STRICT pairs `solid part` with `endsolid part` — no mismatch.
+        let rep = lint_ascii(STRICT.as_bytes()).unwrap();
+        assert_eq!(rep.solid_name_mismatches, 0);
+    }
+
+    #[test]
+    fn mismatched_solid_endsolid_names_flagged() {
+        let s = STRICT.replace("endsolid part", "endsolid other");
+        let rep = lint_ascii(s.as_bytes()).unwrap();
+        assert_eq!(rep.solid_name_mismatches, 1);
+        // The example carries the opening name on the endsolid line.
+        assert_eq!(rep.solid_name_mismatch_examples[0].token, "part");
+        assert_eq!(rep.solid_name_mismatch_examples[0].line, 9);
+        assert!(!rep.is_strict_spec());
+    }
+
+    #[test]
+    fn named_open_bare_close_is_a_mismatch() {
+        // `solid part` … `endsolid` (bare) — spec shows the name on
+        // both lines, so a named-vs-bare pair counts.
+        let s = STRICT.replace("endsolid part", "endsolid");
+        let rep = lint_ascii(s.as_bytes()).unwrap();
+        assert_eq!(rep.solid_name_mismatches, 1);
+        assert_eq!(rep.solid_name_mismatch_examples[0].token, "part");
+    }
+
+    #[test]
+    fn two_bare_lines_are_not_a_mismatch() {
+        // `solid` … `endsolid` with no name on either side is fine
+        // (the optional name is simply absent on both).
+        let s = "solid\n  facet normal 0 0 1\n    outer loop\n      vertex 0 0 0\n      vertex 1 0 0\n      vertex 0 1 0\n    endloop\n  endfacet\nendsolid\n";
+        let rep = lint_ascii(s.as_bytes()).unwrap();
+        assert_eq!(rep.solid_name_mismatches, 0);
+    }
+
+    #[test]
+    fn name_comparison_trims_surrounding_whitespace() {
+        // Trailing spaces on the names must not register as a mismatch.
+        let s = STRICT
+            .replace("solid part", "solid part  ")
+            .replace("endsolid part", "endsolid   part");
+        let rep = lint_ascii(s.as_bytes()).unwrap();
+        assert_eq!(rep.solid_name_mismatches, 0, "{rep:?}");
+    }
+
+    #[test]
+    fn findings_by_rule_includes_name_mismatch_label() {
+        let s = STRICT.replace("endsolid part", "endsolid nope");
+        let rep = lint_ascii(s.as_bytes()).unwrap();
+        let labeled = rep.findings_by_rule();
+        let entry = labeled
+            .iter()
+            .find(|(k, _)| *k == "solid_name_mismatch")
+            .unwrap();
+        assert_eq!(entry.1, 1);
+        // The labeled breakdown sums to the headline total.
+        let sum: usize = labeled.iter().map(|(_, c)| c).sum();
+        assert_eq!(sum, rep.finding_total());
     }
 }
