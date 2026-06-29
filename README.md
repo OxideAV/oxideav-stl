@@ -1398,7 +1398,10 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
   `validate` + `topology` (repair) surface that the byte-parsing
   targets never reach: `validate` with every rule on (including the
   opt-in `check_t_junctions` / `check_positive_octant` brute-force
-  scans), `bbox` / `bbox_of_mesh` / `bbox_of_primitive`, `shells`, and
+  scans), `bbox` / `bbox_of_mesh` / `bbox_of_primitive`, `shells`,
+  `boundary_loops`, the non-mutating scalar-geometry diagnostics
+  (`mesh_volume` / `mesh_surface_area` / `mesh_edge_length_stats` /
+  `mesh_centroid` / `check_z_sorted`), and
   every mutating repair pass (including `repair_cap_boundary_loops`) —
   individually on per-pass clones and as the full documented pipeline
   on one scene, re-validated at the end. Each pass takes a caller-controlled scene and must return
@@ -1462,7 +1465,7 @@ Every failure is reproducible from its printed seed.
 
 ## Benchmarks
 
-`benches/` carries four Criterion suites driven entirely by
+`benches/` carries five Criterion suites driven entirely by
 deterministic xorshift32 fixtures (no committed binary corpora, no
 `docs/` traffic — each generator is seeded from a fixed constant so
 results are bit-stable across hosts and runs):
@@ -1484,6 +1487,13 @@ results are bit-stable across hosts and runs):
   `validate_t_junctions_on` at 100 / 300 / 1 000 (the opt-in
   brute-force T-junction sub-check) so the diagnostic-only
   warning on the T-junction rule is empirically substantiated.
+- `geometry` — the four non-mutating scalar-geometry diagnostics
+  (`mesh_volume`, `mesh_surface_area`, `mesh_edge_length_stats`,
+  `mesh_centroid`) at 1 K / 10 K / 100 K triangles. Each is a single
+  `O(N)` `f64`-accumulated forward pass; the bench surfaces their
+  relative weight in one comparison (the per-edge `sqrt`×3 in
+  `mesh_edge_length_stats` is the heaviest, the dual area+volume moment
+  in `mesh_centroid` second).
 
 Run with `cargo bench -p oxideav-stl --bench <name>` or `--quick
 --noplot` for a fast headline sweep. Indicative numbers
@@ -1493,11 +1503,14 @@ profile): binary decode ~7.6 GiB/s at 100 K triangles; ASCII decode
 9.2 ms/10 K triangles; default-rule
 `validate` ~2.6–3.8 Melem/s; T-junction sub-check ~50–410 Kelem/s
 (a 70× brake vs the default rules at matched N — the
-diagnostic-only cost noted on that rule above).
+diagnostic-only cost noted on that rule above). At 100 K triangles the
+scalar-geometry diagnostics run `mesh_volume` ~255 µs,
+`mesh_surface_area` ~274 µs, `mesh_centroid` ~546 µs (dual moment),
+`mesh_edge_length_stats` ~990 µs (per-edge `sqrt`×3).
 
 ## Profiling
 
-`examples/` carries six deterministic, single-threaded long-running
+`examples/` carries seven deterministic, single-threaded long-running
 drivers wrapping each hot path so a profiler can attribute cycles
 line-by-line without Criterion's adaptive batching getting in the
 way. Every driver runs against a fixed xorshift32-derived fixture
@@ -1512,7 +1525,7 @@ perf record -g cargo run --release --example profile_validate
 # (Instruments' Time Profiler on macOS / Xcode equivalent on iOS)
 ```
 
-The six targets:
+The seven targets:
 
 - `profile_encode_binary` (2 000 × 10 K triangles) — pack-record /
   LE-float-byte emit hot loop in `binary::encode`.
@@ -1528,6 +1541,11 @@ The six targets:
 - `profile_validate` (200 × 10 K triangles) — default-on rule set
   (facet orientation + unit normal + watertight/manifold +
   consistent winding).
+- `profile_geometry` (500 × 10 K triangles) — the four non-mutating
+  scalar-geometry diagnostics (`mesh_volume` + `mesh_surface_area` +
+  `mesh_edge_length_stats` + `mesh_centroid`) run in sequence so the
+  shared cross-product / triple-product / `sqrt` hot loops attribute
+  cycles in one flame graph.
 
 Shared fixture builders live in `examples/profile_common/mod.rs`
 and are pulled in by each driver via `#[path =

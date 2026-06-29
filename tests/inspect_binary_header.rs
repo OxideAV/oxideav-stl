@@ -86,9 +86,7 @@ fn synth_with_header_text(text: &str) -> Vec<u8> {
 
 #[test]
 fn inspector_surfaces_materialise_defaults_pre_decode() {
-    let bytes = synth_with_header_text(
-        "COLOR=12 34 56 78\nMATERIAL=1 2 3 4 5 6 7 8 9 10 11 12\n",
-    );
+    let bytes = synth_with_header_text("COLOR=12 34 56 78\nMATERIAL=1 2 3 4 5 6 7 8 9 10 11 12\n");
     let rep: BinaryHeaderReport = inspect_binary_header(&bytes).unwrap();
     assert!(rep.has_materialise_header());
     assert_eq!(rep.materialise_default_color, Some([12, 34, 56, 78]));

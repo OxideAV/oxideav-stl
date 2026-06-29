@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `benches/geometry.rs` — fifth Criterion suite benchmarking the four
+  non-mutating scalar-geometry diagnostics (`mesh_volume`,
+  `mesh_surface_area`, `mesh_edge_length_stats`, `mesh_centroid`) at
+  1 K / 10 K / 100 K triangles, plus `examples/profile_geometry.rs`
+  (seventh profiling driver) running all four in sequence. Indicative
+  100 K-triangle costs: volume ~255 µs, area ~274 µs, centroid ~546 µs,
+  edge-length-stats ~990 µs (the per-edge `sqrt`×3 is the heaviest).
+
 - `inspect::inspect_binary_header` now surfaces the 80-byte header's
   Materialise per-object default lines. New `BinaryHeaderReport` fields
   `materialise_default_color` (`Option<[u8; 4]>`) and

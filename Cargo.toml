@@ -70,3 +70,7 @@ harness = false
 [[bench]]
 name = "validate"
 harness = false
+
+[[bench]]
+name = "geometry"
+harness = false
