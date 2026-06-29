@@ -69,6 +69,41 @@ pub struct BinaryHeaderReport {
     /// [`Self::triangle_count`] iff the file is at least
     /// `84 + N * 50` bytes long.
     pub triangles_walked: usize,
+    /// Materialise per-object default colour parsed from a `COLOR=R G B
+    /// A` line in the 80-byte header, when present and well-formed
+    /// (four `0..=255` integers). `None` when no such line is present.
+    /// The same value the full decode path surfaces on
+    /// `Primitive::extras["stl:default_color"]`, surfaced here for
+    /// pre-decode triage without building a `Scene3D`.
+    pub materialise_default_color: Option<[u8; 4]>,
+    /// Materialise per-object default material parsed from a
+    /// `MATERIAL=…` line (twelve `0..=255` integers: three RGB+S
+    /// quartets), when present and well-formed. `None` otherwise. The
+    /// same value the decode path surfaces on
+    /// `Primitive::extras["stl:default_material"]`.
+    pub materialise_default_material: Option<[u8; 12]>,
+}
+
+impl BinaryHeaderReport {
+    /// `true` iff the 80-byte header carries a well-formed Materialise
+    /// `COLOR=` line. Convenience predicate over
+    /// [`Self::materialise_default_color`].
+    pub fn has_materialise_color(&self) -> bool {
+        self.materialise_default_color.is_some()
+    }
+
+    /// `true` iff the 80-byte header carries a well-formed Materialise
+    /// `MATERIAL=` line. Convenience predicate over
+    /// [`Self::materialise_default_material`].
+    pub fn has_materialise_material(&self) -> bool {
+        self.materialise_default_material.is_some()
+    }
+
+    /// `true` iff the header carries either Materialise default line —
+    /// a quick "is a vendor-extension header in play?" triage signal.
+    pub fn has_materialise_header(&self) -> bool {
+        self.has_materialise_color() || self.has_materialise_material()
+    }
 }
 
 /// Inspect the header + per-triangle attribute slots of a binary STL
@@ -87,9 +122,12 @@ pub struct BinaryHeaderReport {
 ///
 /// This function does NOT attempt to distinguish ASCII vs binary —
 /// it is the caller's responsibility to route binary bytes here. The
-/// 80-byte header is treated as opaque (the report does not parse
-/// out any Materialise `COLOR=` / `MATERIAL=` lines; see
-/// [`crate::materialise_header`] for that).
+/// 80-byte header's Materialise `COLOR=` / `MATERIAL=` default lines,
+/// when present and well-formed, are surfaced on
+/// [`BinaryHeaderReport::materialise_default_color`] /
+/// [`BinaryHeaderReport::materialise_default_material`] (matching the
+/// values the full decode path records on `Primitive::extras`); the
+/// rest of the header is treated as opaque.
 pub fn inspect_binary_header(bytes: &[u8]) -> Result<BinaryHeaderReport> {
     if bytes.len() < HEADER_BYTES {
         return Err(Error::InvalidData(format!(
@@ -97,6 +135,13 @@ pub fn inspect_binary_header(bytes: &[u8]) -> Result<BinaryHeaderReport> {
             bytes.len()
         )));
     }
+    // Parse the Materialise per-object default lines out of the 80-byte
+    // header (same parser + same 80-byte slice the full decode path
+    // uses, so the surfaced values agree with `Primitive::extras` byte
+    // for byte; the 4-byte count field at 80..84 is excluded).
+    let (materialise_default_color, materialise_default_material) =
+        crate::materialise_header::parse_header(&bytes[..80]);
+
     let triangle_count = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]);
 
     // `usize::checked_mul` rules out the pathological case of a 4 GiB
@@ -150,6 +195,8 @@ pub fn inspect_binary_header(bytes: &[u8]) -> Result<BinaryHeaderReport> {
         non_zero_attribute_fraction,
         spec_compliant_attributes: non_zero_attribute_count == 0,
         triangles_walked,
+        materialise_default_color,
+        materialise_default_material,
     })
 }
 
@@ -296,5 +343,83 @@ mod tests {
         assert_eq!(rep, copied);
         // And `Debug`-printable for diagnostic logs.
         let _ = format!("{rep:?}");
+    }
+
+    /// Synthesise a binary STL whose 80-byte header begins with the
+    /// given ASCII text (e.g. Materialise `COLOR=`/`MATERIAL=` lines),
+    /// NUL-padded to 80 bytes, plus a zero-triangle body.
+    fn synth_with_header_text(text: &str) -> Vec<u8> {
+        let mut header = [0u8; 80];
+        let t = text.as_bytes();
+        let n = t.len().min(80);
+        header[..n].copy_from_slice(&t[..n]);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&header);
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn plain_header_has_no_materialise_defaults() {
+        let bytes = synth(2, &[(0, 0), (0, 0)]);
+        let rep = inspect_binary_header(&bytes).unwrap();
+        assert_eq!(rep.materialise_default_color, None);
+        assert_eq!(rep.materialise_default_material, None);
+        assert!(!rep.has_materialise_color());
+        assert!(!rep.has_materialise_material());
+        assert!(!rep.has_materialise_header());
+    }
+
+    #[test]
+    fn materialise_color_line_is_surfaced() {
+        let bytes = synth_with_header_text("COLOR=10 20 30 40\n");
+        let rep = inspect_binary_header(&bytes).unwrap();
+        assert_eq!(rep.materialise_default_color, Some([10, 20, 30, 40]));
+        assert!(rep.has_materialise_color());
+        assert!(!rep.has_materialise_material());
+        assert!(rep.has_materialise_header());
+    }
+
+    #[test]
+    fn materialise_material_line_is_surfaced() {
+        let bytes = synth_with_header_text("MATERIAL=1 2 3 4 5 6 7 8 9 10 11 12\n");
+        let rep = inspect_binary_header(&bytes).unwrap();
+        assert_eq!(
+            rep.materialise_default_material,
+            Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        );
+        assert!(rep.has_materialise_material());
+        assert!(rep.has_materialise_header());
+    }
+
+    #[test]
+    fn both_materialise_lines_surfaced_together() {
+        let bytes = synth_with_header_text(
+            "COLOR=255 0 0 255\nMATERIAL=255 0 0 50 0 255 0 50 0 0 255 50\n",
+        );
+        let rep = inspect_binary_header(&bytes).unwrap();
+        assert_eq!(rep.materialise_default_color, Some([255, 0, 0, 255]));
+        assert_eq!(
+            rep.materialise_default_material,
+            Some([255, 0, 0, 50, 0, 255, 0, 50, 0, 0, 255, 50])
+        );
+        assert!(rep.has_materialise_header());
+    }
+
+    #[test]
+    fn inspector_materialise_agrees_with_decode() {
+        // The inspector's parsed defaults must match what the full
+        // decode path records on Primitive::extras.
+        let bytes = synth_with_header_text("COLOR=7 8 9 10\n");
+        let rep = inspect_binary_header(&bytes).unwrap();
+        let scene = crate::binary::decode(&bytes).unwrap();
+        let prim = &scene.meshes[0].primitives[0];
+        let arr = prim
+            .extras
+            .get("stl:default_color")
+            .and_then(|v| v.as_array())
+            .expect("decode should record default_color");
+        let decoded: Vec<u8> = arr.iter().map(|v| v.as_u64().unwrap() as u8).collect();
+        assert_eq!(decoded.as_slice(), &rep.materialise_default_color.unwrap());
     }
 }

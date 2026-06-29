@@ -1249,8 +1249,18 @@ the raw header-level facts only — `triangle_count`,
 `expected_byte_length` vs `actual_byte_length`,
 `non_zero_attribute_count` + matching `_fraction`,
 `spec_compliant_attributes`, `triangles_walked` — and never
-classifies which convention. (For convention classification see
-`oxideav_stl::detect_color_convention`.)
+classifies which per-face convention. (For convention classification
+see `oxideav_stl::detect_color_convention`.)
+
+The 80-byte header's Materialise per-object default lines (`COLOR=R G B
+A` and `MATERIAL=…`), when present and well-formed, are parsed out and
+surfaced on `materialise_default_color` (`Option<[u8; 4]>`) and
+`materialise_default_material` (`Option<[u8; 12]>`), matching the values
+the full decode path records on `Primitive::extras["stl:default_color"]`
+/ `["stl:default_material"]`. Three convenience predicates —
+`has_materialise_color()`, `has_materialise_material()`,
+`has_materialise_header()` — answer the pre-decode triage question "is a
+vendor-extension header in play?" without building a `Scene3D`.
 
 Truncated streams (slice shorter than the declared
 `triangle_count * 50 + 84`) are NOT an error here; the inspector

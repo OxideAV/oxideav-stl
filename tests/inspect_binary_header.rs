@@ -70,3 +70,39 @@ fn empty_triangle_list_is_spec_compliant() {
     assert!(rep.length_matches_exactly);
     assert!(rep.non_zero_attribute_fraction.is_nan());
 }
+
+/// Build a binary STL whose 80-byte header begins with the given ASCII
+/// text (Materialise vendor lines), NUL-padded, with a zero-tri body.
+fn synth_with_header_text(text: &str) -> Vec<u8> {
+    let mut header = [0u8; 80];
+    let t = text.as_bytes();
+    let n = t.len().min(80);
+    header[..n].copy_from_slice(&t[..n]);
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&header);
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf
+}
+
+#[test]
+fn inspector_surfaces_materialise_defaults_pre_decode() {
+    let bytes = synth_with_header_text(
+        "COLOR=12 34 56 78\nMATERIAL=1 2 3 4 5 6 7 8 9 10 11 12\n",
+    );
+    let rep: BinaryHeaderReport = inspect_binary_header(&bytes).unwrap();
+    assert!(rep.has_materialise_header());
+    assert_eq!(rep.materialise_default_color, Some([12, 34, 56, 78]));
+    assert_eq!(
+        rep.materialise_default_material,
+        Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    );
+}
+
+#[test]
+fn plain_vendor_header_reports_no_materialise_defaults() {
+    let bytes = synth(1, &[(0, 0)]);
+    let rep = inspect_binary_header(&bytes).unwrap();
+    assert!(!rep.has_materialise_header());
+    assert_eq!(rep.materialise_default_color, None);
+    assert_eq!(rep.materialise_default_material, None);
+}

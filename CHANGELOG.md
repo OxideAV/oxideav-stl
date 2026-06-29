@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `inspect::inspect_binary_header` now surfaces the 80-byte header's
+  Materialise per-object default lines. New `BinaryHeaderReport` fields
+  `materialise_default_color` (`Option<[u8; 4]>`) and
+  `materialise_default_material` (`Option<[u8; 12]>`) carry the parsed
+  `COLOR=` / `MATERIAL=` values (the same 80-byte slice + parser the full
+  decode path uses, so they agree with `Primitive::extras` byte for
+  byte), plus three convenience predicates `has_materialise_color()` /
+  `has_materialise_material()` / `has_materialise_header()` for
+  pre-decode "is a vendor-extension header in play?" triage. Previously
+  the inspector treated the whole header as opaque. 5 in-module + 2
+  integration tests.
+
 - `lint::lint_ascii` rule 8 — **`solid` / `endsolid` name mismatch**.
   The 1989 spec grammar pairs `solid <name>` with `endsolid <name>`
   carrying the same name; the decoder consumes the closing name without
