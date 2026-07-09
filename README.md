@@ -858,6 +858,36 @@ The natural sequence is `repair_weld_vertices` →
 degenerates by collapsing duplicated corners, and the drop pass
 removes them.
 
+## Duplicate-facet culling
+
+```rust
+use oxideav_stl::repair_drop_duplicate_facets;
+
+# let mut scene = oxideav_mesh3d::Scene3D::new();
+// Drop repeated facets in-place. Two facets are duplicates when their
+// three corner *positions* form the same unordered set under bit-exact
+// `f32` match — so an exact repeat AND a reversed-winding twin both
+// count. `DuplicateFacetDropReport { triangles_inspected,
+// dropped_triangles }` — `dropped_triangles == 0` is the idempotency
+// signal.
+let report = repair_drop_duplicate_facets(&mut scene);
+```
+
+A duplicate facet is a distinct STL defect: it doubles a surface patch,
+and each of its three edges silently picks up an extra incidence, so a
+watertight-looking edge becomes used four times. Neither
+`repair_drop_degenerate_triangles` (the corners are distinct) nor the
+validate module's non-manifold-edge rule (an identical pair keeps every
+edge at an even use count) catches it, which is why this is a separate
+pass. The **first** occurrence in scan order survives; every later copy
+is dropped. Per-`Triangles`-primitive isolation (no cross-primitive
+detection — pre-merge with `repair_weld_vertices`, which collapses
+vertices only). Out-of-range-index faces carry no resolvable key and are
+left in place for the degenerate / encode passes. Indexed primitives
+keep their `Indices::U16` / `U32` discriminant. The natural sequence is
+`repair_weld_vertices` → `repair_drop_duplicate_facets` →
+`repair_drop_degenerate_triangles`.
+
 ## Zero-normal recompute (RHR sentinel)
 
 ```rust

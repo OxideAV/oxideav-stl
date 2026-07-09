@@ -29,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `topology::repair_drop_duplicate_facets` + `DuplicateFacetDropReport`
+  — new mutating repair that removes surplus copies of a repeated
+  corner-triple (an exact repeat *or* a reversed-winding twin, keyed on
+  the unordered set of the three corner-position bit patterns). A
+  doubled surface patch is a defect neither the degenerate rule (corners
+  are distinct) nor the non-manifold-edge rule (an identical pair keeps
+  every edge at an even use count) catches, so it needs its own pass.
+  First occurrence in scan order survives; per-`Triangles`-primitive
+  isolation; `Indices` discriminant preserved; out-of-range-index faces
+  left in place. Pinned by `tests/repair_dedup_facets.rs` (6 tests). The
+  indexed/unindexed buffer-compaction logic is now shared with
+  `repair_drop_degenerate_triangles` via an internal
+  `compact_primitive_faces` helper.
+
 - `ValidationReport::non_manifold_edge_examples` — the non-manifold-edge
   rule now surfaces up to `MAX_REPORTED_DEFECTS` illustrative
   `FaceLocator`s (the third-and-later triangle incident on each edge

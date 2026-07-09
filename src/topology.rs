@@ -731,8 +731,22 @@ fn drop_degenerate_in_primitive(prim: &mut Primitive, report: &mut DegenerateDro
         return;
     }
     report.dropped_triangles += dropped_local;
+    compact_primitive_faces(prim, &keep, dropped_local);
+}
 
-    // Rewrite the buffers.
+/// Rewrite a `Triangles` primitive's buffers to keep only the faces
+/// flagged `true` in `keep` (one bool per resolved triangle slot).
+///
+/// Shared by the face-dropping repairs ([`repair_drop_degenerate_triangles`],
+/// [`repair_drop_duplicate_facets`]). For an indexed primitive the index
+/// buffer is rewritten with the surviving triangle slots and the
+/// `Indices` discriminant is preserved (`U16` stays `U16`, `U32` stays
+/// `U32`). For an unindexed primitive the `positions` (and `normals`,
+/// when present and matched 1:1 in length) are compacted in place.
+/// `dropped` is `keep.iter().filter(|k| !**k).count()`, passed in so the
+/// capacity math is exact.
+fn compact_primitive_faces(prim: &mut Primitive, keep: &[bool], dropped: usize) {
+    let face_count = keep.len();
     let normals_match = prim
         .normals
         .as_ref()
@@ -740,7 +754,7 @@ fn drop_degenerate_in_primitive(prim: &mut Primitive, report: &mut DegenerateDro
         .unwrap_or(false);
     match prim.indices.take() {
         Some(Indices::U16(idx)) => {
-            let mut new_idx = Vec::with_capacity(face_count * 3 - dropped_local * 3);
+            let mut new_idx = Vec::with_capacity(face_count * 3 - dropped * 3);
             for (face_idx, keep_face) in keep.iter().enumerate() {
                 if !*keep_face {
                     continue;
@@ -751,7 +765,7 @@ fn drop_degenerate_in_primitive(prim: &mut Primitive, report: &mut DegenerateDro
             prim.indices = Some(Indices::U16(new_idx));
         }
         Some(Indices::U32(idx)) => {
-            let mut new_idx = Vec::with_capacity(face_count * 3 - dropped_local * 3);
+            let mut new_idx = Vec::with_capacity(face_count * 3 - dropped * 3);
             for (face_idx, keep_face) in keep.iter().enumerate() {
                 if !*keep_face {
                     continue;
@@ -791,6 +805,114 @@ fn drop_degenerate_in_primitive(prim: &mut Primitive, report: &mut DegenerateDro
             }
         }
     }
+}
+
+/// Outcome of a [`repair_drop_duplicate_facets`] pass.
+///
+/// Counters are summed across every `Triangles` primitive in the
+/// scene. `dropped_triangles == 0` is the idempotency signal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DuplicateFacetDropReport {
+    /// Total triangle slots inspected (post-index-buffer resolution)
+    /// across every touched primitive.
+    pub triangles_inspected: usize,
+    /// Number of surplus duplicate facets removed from the scene — the
+    /// second-and-later copy of each repeated corner-triple. Equals
+    /// zero on a scene with no repeated facets (the idempotency
+    /// signal).
+    pub dropped_triangles: usize,
+}
+
+/// Remove duplicate facets in-place from every `Triangles` primitive.
+///
+/// Two facets are duplicates when their three corner *positions* form
+/// the same unordered set under bit-exact `f32` matching — so an exact
+/// repeat AND a reversed-winding twin (which cover the same surface
+/// patch) both count. The **first** occurrence in scan order survives;
+/// every later copy is dropped. A duplicate facet is a genuine STL
+/// defect: it doubles a surface patch, and its three edges each pick up
+/// an extra incidence, so a watertight-looking edge silently becomes
+/// used four times. Neither the degenerate rule (the corners are
+/// distinct) nor the non-manifold-edge rule (an identical pair keeps
+/// every edge at an even use count) catches it, which is why this is a
+/// separate pass.
+///
+/// Per-`Triangles`-primitive isolation: duplicates are detected within a
+/// single primitive's own face list, never across primitives (merging
+/// primitives is out of scope — pre-merge with [`repair_weld_vertices`]
+/// only collapses *vertices*, not primitives). Faces whose index is out
+/// of range are left in place (they carry no resolvable key) for the
+/// degenerate / encode passes to handle. Non-`Triangles` primitives are
+/// untouched; `prim.extras`, `mesh.name`, and the scene-graph structure
+/// are preserved. The `Indices` discriminant survives (`U16` stays
+/// `U16`, `U32` stays `U32`).
+///
+/// The natural sequence is [`repair_weld_vertices`] →
+/// `repair_drop_duplicate_facets` → [`repair_drop_degenerate_triangles`]:
+/// the weld collapses noise corners so bit-exact duplicate detection
+/// sees them as identical, the duplicate pass removes doubled surface
+/// patches, and the degenerate pass removes zero-area faces.
+pub fn repair_drop_duplicate_facets(scene: &mut Scene3D) -> DuplicateFacetDropReport {
+    let mut report = DuplicateFacetDropReport::default();
+    for mesh in &mut scene.meshes {
+        for prim in &mut mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            drop_duplicate_facets_in_primitive(prim, &mut report);
+        }
+    }
+    report
+}
+
+fn drop_duplicate_facets_in_primitive(prim: &mut Primitive, report: &mut DuplicateFacetDropReport) {
+    let face_count = match &prim.indices {
+        Some(idx) => idx.len() / 3,
+        None => prim.positions.len() / 3,
+    };
+    if face_count == 0 {
+        return;
+    }
+    report.triangles_inspected += face_count;
+
+    let vkey =
+        |p: [f32; 3]| -> (u32, u32, u32) { (p[0].to_bits(), p[1].to_bits(), p[2].to_bits()) };
+    let mut seen: std::collections::HashSet<[(u32, u32, u32); 3]> =
+        std::collections::HashSet::with_capacity(face_count);
+    let mut keep = Vec::with_capacity(face_count);
+    let mut dropped_local = 0usize;
+    for face_idx in 0..face_count {
+        let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+        let (a, b, c) = match (
+            prim.positions.get(vi0).copied(),
+            prim.positions.get(vi1).copied(),
+            prim.positions.get(vi2).copied(),
+        ) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            // Out-of-range index — no resolvable key, so it can never
+            // be a duplicate; retain it for the degenerate / encode
+            // passes rather than silently dropping geometry here.
+            _ => {
+                keep.push(true);
+                continue;
+            }
+        };
+        // Unordered corner-triple key: sort the three vertex bit-keys so
+        // a reversed-winding twin hashes identically to its original.
+        let mut ks = [vkey(a), vkey(b), vkey(c)];
+        ks.sort_unstable();
+        if seen.insert(ks) {
+            keep.push(true);
+        } else {
+            dropped_local += 1;
+            keep.push(false);
+        }
+    }
+    if dropped_local == 0 {
+        return;
+    }
+    report.dropped_triangles += dropped_local;
+    compact_primitive_faces(prim, &keep, dropped_local);
 }
 
 fn vert_key_eq(a: [f32; 3], b: [f32; 3]) -> bool {
