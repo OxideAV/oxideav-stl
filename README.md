@@ -1485,8 +1485,9 @@ Actions schedule (`.github/workflows/fuzz.yml`, 1800-second budget):
   scans), `bbox` / `bbox_of_mesh` / `bbox_of_primitive`, `shells`,
   `boundary_loops`, the non-mutating scalar-geometry diagnostics
   (`mesh_volume` / `mesh_surface_area` / `mesh_edge_length_stats` /
-  `mesh_centroid` / `check_z_sorted`), and
-  every mutating repair pass (including `repair_cap_boundary_loops`) —
+  `mesh_centroid` / `mesh_inertia` / `check_z_sorted`), and
+  every mutating repair pass (including `repair_drop_duplicate_facets`
+  and `repair_cap_boundary_loops`) —
   individually on per-pass clones and as the full documented pipeline
   on one scene, re-validated at the end. Each pass takes a caller-controlled scene and must return
   its report rather than panic / index past a buffer / overflow on a

@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fuzz/fuzz_targets/repair.rs` now also drives `mesh_inertia` and
+  `repair_drop_duplicate_facets` (per-clone and in the documented full
+  pipeline) so the two new geometry surfaces are covered by the
+  panic-freedom fuzzer alongside every other diagnostic + repair.
+
 - `topology::mesh_inertia` + `MeshInertiaReport` — the rotational-inertia
   completion of the mass-property family (`mesh_volume` = mass,
   `mesh_centroid` = centre of mass, `mesh_inertia` = inertia tensor).

@@ -194,16 +194,7 @@ fuzz_target!(|data: &[u8]| {
 
     // --- stats + dedup helpers across a tolerance spread ---
     let _ = StlEncoder::stats(&scene);
-    for &eps in &[
-        -1.0f32,
-        f32::NAN,
-        f32::INFINITY,
-        0.0,
-        1e-6,
-        1e-3,
-        1.0,
-        1e30,
-    ] {
+    for &eps in &[-1.0f32, f32::NAN, f32::INFINITY, 0.0, 1e-6, 1e-3, 1.0, 1e30] {
         let _ = StlEncoder::unique_vertices_with_tolerance(&scene, eps);
         let _ = StlEncoder::unique_vertices_with_tolerance_spatial(&scene, eps);
         let _ = EncodeStats::with_tolerance(&scene, eps);

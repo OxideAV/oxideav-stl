@@ -36,8 +36,8 @@ use libfuzzer_sys::fuzz_target;
 use oxideav_mesh3d::{Indices, Mesh, Node, Primitive, Scene3D, Topology};
 use oxideav_stl::{
     bbox, bbox_of_mesh, bbox_of_primitive, boundary_loops, check_z_sorted, mesh_centroid,
-    mesh_edge_length_stats, mesh_surface_area, mesh_volume, repair_cap_boundary_loops,
-    repair_drop_degenerate_triangles,
+    mesh_edge_length_stats, mesh_inertia, mesh_surface_area, mesh_volume,
+    repair_cap_boundary_loops, repair_drop_degenerate_triangles, repair_drop_duplicate_facets,
     repair_make_winding_consistent, repair_normalize_unit_normals,
     repair_orient_normals_from_winding, repair_recompute_zero_normals, repair_sort_triangles_by_z,
     repair_split_t_junctions, repair_translate_to_positive_octant, repair_weld_vertices, shells,
@@ -217,6 +217,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = mesh_surface_area(&scene);
     let _ = mesh_edge_length_stats(&scene);
     let _ = mesh_centroid(&scene);
+    let _ = mesh_inertia(&scene);
     let _ = check_z_sorted(&scene);
 
     // --- mutating repair surface ---
@@ -226,6 +227,7 @@ fuzz_target!(|data: &[u8]| {
     // controlled scene and must return its report rather than panic.
     let _ = repair_weld_vertices(&mut scene.clone());
     let _ = repair_drop_degenerate_triangles(&mut scene.clone());
+    let _ = repair_drop_duplicate_facets(&mut scene.clone());
     let _ = repair_recompute_zero_normals(&mut scene.clone(), 0.0);
     let _ = repair_recompute_zero_normals(&mut scene.clone(), 1e-3);
     let _ = repair_orient_normals_from_winding(&mut scene.clone(), 0.0);
@@ -243,6 +245,7 @@ fuzz_target!(|data: &[u8]| {
     // then removes, the splitter re-walking a freshly welded soup).
     let mut piped = scene;
     let _ = repair_weld_vertices(&mut piped);
+    let _ = repair_drop_duplicate_facets(&mut piped);
     let _ = repair_drop_degenerate_triangles(&mut piped);
     let _ = repair_recompute_zero_normals(&mut piped, 0.0);
     let _ = repair_orient_normals_from_winding(&mut piped, 0.0);
