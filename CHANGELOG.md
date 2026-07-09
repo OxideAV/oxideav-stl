@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ValidationReport::non_manifold_edge_examples` — the non-manifold-edge
+  rule now surfaces up to `MAX_REPORTED_DEFECTS` illustrative
+  `FaceLocator`s (the third-and-later triangle incident on each edge
+  shared by three or more triangles, in scan order), closing the one
+  watertight-rule sub-count that reported a bare number without the
+  example list every other rule carries. Additive: `is_clean`,
+  `defect_total`, and `defects_by_rule` are unchanged (the surplus edges
+  still count once each under `non_manifold_edges`).
+
 - `tests/property_roundtrip.rs` geometry-diagnostic invariants — three
   new deterministic property tests over the existing seeded LCG sweep:
   `mesh_surface_area` + `mesh_edge_length_stats` are translation-

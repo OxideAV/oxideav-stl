@@ -262,8 +262,19 @@ use oxideav_stl::{validate, ValidationOptions};
 let report = validate(&scene, &ValidationOptions::default());
 if !report.watertight {
     eprintln!("not watertight: {} boundary edges", report.boundary_edges);
+    for loc in &report.non_manifold_edge_examples {
+        eprintln!("over-shared edge near face {}", loc.face);
+    }
 }
 ```
+
+The watertight rule counts both `boundary_edges` (used by one triangle)
+and `non_manifold_edges` (used by three or more). The latter now also
+carries `non_manifold_edge_examples` — up to `MAX_REPORTED_DEFECTS`
+illustrative `FaceLocator`s of the surplus (third-and-later) triangles
+that tip an edge past the manifold pair, in scan order — so the
+non-manifold rule surfaces starting points the same way every other
+rule does.
 
 The positive-octant rule (which no modern slicer enforces) is off by
 default; toggle `ValidationOptions::check_positive_octant = true`

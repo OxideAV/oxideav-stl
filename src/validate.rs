@@ -797,6 +797,16 @@ pub struct ValidationReport {
     /// triangles — a sign of a non-manifold surface. Zero when
     /// [`ValidationOptions::check_watertight`] is off.
     pub non_manifold_edges: usize,
+    /// Up to [`MAX_REPORTED_DEFECTS`] illustrative facet locations of
+    /// triangles incident on a non-manifold edge (one shared by three
+    /// or more triangles). Populated in scan order — the third-and-
+    /// later triangle to reach each over-shared edge contributes a
+    /// locator, so a caller has a starting point for the surplus
+    /// incidences a repair pass would need to remove or split. A single
+    /// triangle may appear more than once when several of its edges are
+    /// over-shared. Empty when `non_manifold_edges == 0` or the
+    /// watertight rule is off.
+    pub non_manifold_edge_examples: Vec<FaceLocator>,
     /// `true` iff every edge appears in exactly two triangles
     /// (`boundary_edges == 0` AND `non_manifold_edges == 0`) AND
     /// at least one triangle was walked. `false` for empty scenes
@@ -1109,7 +1119,14 @@ pub fn validate(scene: &Scene3D, opts: &ValidationOptions) -> ValidationReport {
                     let b2 = bits(v2);
                     for (a, b) in [(b0, b1), (b1, b2), (b2, b0)] {
                         let key = if a <= b { (a, b) } else { (b, a) };
-                        *edge_uses.entry(key).or_insert(0) += 1;
+                        let uses = edge_uses.entry(key).or_insert(0);
+                        *uses += 1;
+                        // The third-and-later triangle to touch an edge
+                        // is what tips it into non-manifold territory;
+                        // surface those surplus incidences in scan order.
+                        if *uses >= 3 {
+                            push_capped(&mut rep.non_manifold_edge_examples, loc);
+                        }
                     }
                 }
             }
@@ -2627,6 +2644,19 @@ mod tests {
         assert_eq!(r.triangles_total, 3);
         assert!(r.non_manifold_edges >= 1, "report: {r:?}");
         assert!(!r.watertight);
+        // The over-shared edge is touched by three triangles, so the
+        // third incidence is surfaced as an illustrative locator, and
+        // every reported locator points at a real face in the scene.
+        assert!(!r.non_manifold_edge_examples.is_empty(), "report: {r:?}");
+        for loc in &r.non_manifold_edge_examples {
+            assert_eq!(loc.mesh, 0);
+            assert_eq!(loc.primitive, 0);
+            assert!(loc.face < 3, "loc: {loc:?}");
+        }
+        // A watertight cube has no non-manifold edge, hence no examples.
+        let clean = validate(&unit_cube_indexed_scene(), &ValidationOptions::default());
+        assert_eq!(clean.non_manifold_edges, 0);
+        assert!(clean.non_manifold_edge_examples.is_empty());
     }
 
     #[test]
