@@ -3820,6 +3820,254 @@ pub fn mesh_centroid(scene: &Scene3D) -> MeshCentroidReport {
     report
 }
 
+/// Outcome of a [`mesh_inertia`] pass — the rotational-inertia companion
+/// to [`mesh_volume`] (mass) and [`mesh_centroid`] (centre of mass),
+/// completing the mass-property family for the enclosed solid.
+///
+/// The moments are the divergence-theorem volume integrals over the
+/// solid bounded by the surface, decomposed into signed tetrahedra
+/// spanning the coordinate origin and each facet (the same decomposition
+/// [`mesh_volume`] and [`mesh_centroid`] use). Because they are volume
+/// integrals of the *interior*, every quantity here is a true
+/// mass-property only for a **closed** surface (the same watertightness
+/// precondition [`mesh_volume`] documents); on an open mesh the values
+/// depend on where the origin sits and are not meaningful.
+///
+/// Density is taken as uniform and unit (`ρ = 1`), so the reported
+/// "mass" equals the enclosed volume and the inertia tensor scales
+/// linearly with the caller's real density. Everything is accumulated in
+/// `f64` (corners promoted from `f32` first). A facet with a non-finite
+/// corner is excluded from the moments and sets [`Self::had_non_finite`]
+/// while still counting toward [`Self::triangles_summed`].
+/// Non-`Triangles` primitives are skipped.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeshInertiaReport {
+    /// Number of triangle facets walked across every `Triangles`
+    /// primitive in the scene (post-index-buffer resolution).
+    pub triangles_summed: usize,
+    /// Signed enclosed volume `Σ (v0 · (v1 × v2)) / 6` over finite
+    /// facets — equal (unit density) to the mass. Matches
+    /// [`mesh_volume`]'s `signed_volume` for an all-finite scene.
+    /// Negative for an inside-out (globally winding-flipped) mesh; the
+    /// tensor/mass helpers normalise that sign away.
+    pub signed_volume: f64,
+    /// Whether any corner coordinate walked was non-finite (NaN or ±∞).
+    /// When `true`, the offending facets were excluded from the moments.
+    pub had_non_finite: bool,
+    // First moment `Σ (tet-volume · tet-centroid)` — read via
+    // `center_of_mass`. (Identical to `mesh_centroid`'s volume moment.)
+    first_moment: [f64; 3],
+    // Second moments `∫ xᵢ xⱼ dV` about the origin, signed, packed as
+    // `[xx, yy, zz, xy, xz, yz]`. Read via the tensor helpers.
+    second_moment: [f64; 6],
+}
+
+impl MeshInertiaReport {
+    /// Centre of mass of the enclosed solid — `Σ (tet-volume ·
+    /// tet-centroid) / Σ tet-volume`. `None` when the signed volume is
+    /// zero or non-finite. Equal to [`MeshCentroidReport::volume_centroid`]
+    /// on the same scene; a true centre of mass only for a **closed**
+    /// mesh. Winding-orientation-independent.
+    pub fn center_of_mass(&self) -> Option<[f64; 3]> {
+        if self.signed_volume != 0.0 && self.signed_volume.is_finite() {
+            Some([
+                self.first_moment[0] / self.signed_volume,
+                self.first_moment[1] / self.signed_volume,
+                self.first_moment[2] / self.signed_volume,
+            ])
+        } else {
+            None
+        }
+    }
+
+    /// Mass of the enclosed solid at unit density — the *absolute*
+    /// enclosed volume, so an inside-out mesh reports the same positive
+    /// mass as its correctly-wound twin. Multiply by the caller's real
+    /// density to get physical mass.
+    pub fn mass(&self) -> f64 {
+        self.signed_volume.abs()
+    }
+
+    /// The `3 × 3` symmetric inertia tensor about the centre of mass,
+    /// unit density. `None` when the signed volume is zero or
+    /// non-finite (no solid to reason about).
+    ///
+    /// Row/column order is `(x, y, z)`. Diagonal entries are the moments
+    /// of inertia about each centroidal axis
+    /// (`Iₓₓ = ∫ (y² + z²) dV`, etc.); off-diagonals are the negated
+    /// products of inertia (`Iₓᵧ = −∫ xy dV`). The global winding
+    /// orientation is normalised away (the tensor is multiplied by the
+    /// sign of the signed volume), so for a valid closed solid the result
+    /// is positive-definite regardless of inside-out winding.
+    pub fn inertia_tensor_about_centroid(&self) -> Option<[[f64; 3]; 3]> {
+        if self.signed_volume == 0.0 || !self.signed_volume.is_finite() {
+            return None;
+        }
+        let v = self.signed_volume;
+        let c = [
+            self.first_moment[0] / v,
+            self.first_moment[1] / v,
+            self.first_moment[2] / v,
+        ];
+        // Shift the second moments from the origin to the centroid via
+        // the parallel-axis theorem: ∫(x−c)ᵢ(x−c)ⱼ dV = Mᵢⱼ − V·cᵢ·cⱼ.
+        let [mxx, myy, mzz, mxy, mxz, myz] = self.second_moment;
+        let cxx = mxx - v * c[0] * c[0];
+        let cyy = myy - v * c[1] * c[1];
+        let czz = mzz - v * c[2] * c[2];
+        let cxy = mxy - v * c[0] * c[1];
+        let cxz = mxz - v * c[0] * c[2];
+        let cyz = myz - v * c[1] * c[2];
+        // Inertia tensor from the centroidal second moments, then
+        // orientation-normalised so an inside-out mesh (V < 0) still
+        // yields a positive-definite tensor.
+        let s = if v < 0.0 { -1.0 } else { 1.0 };
+        Some([
+            [s * (cyy + czz), s * (-cxy), s * (-cxz)],
+            [s * (-cxy), s * (cxx + czz), s * (-cyz)],
+            [s * (-cxz), s * (-cyz), s * (cxx + cyy)],
+        ])
+    }
+
+    /// The three principal moments of inertia — the eigenvalues of
+    /// [`Self::inertia_tensor_about_centroid`], sorted ascending. `None`
+    /// under the same zero/non-finite-volume condition. For a valid
+    /// closed solid all three are non-negative and satisfy the triangle
+    /// inequality (each is `≤` the sum of the other two). The
+    /// corresponding eigenvectors are the principal axes — the natural
+    /// orientation to lay a part flat on the build plate.
+    pub fn principal_moments(&self) -> Option<[f64; 3]> {
+        self.inertia_tensor_about_centroid()
+            .map(symmetric_eigenvalues_3x3)
+    }
+}
+
+/// Eigenvalues of a real symmetric `3 × 3` matrix, sorted ascending.
+///
+/// Closed-form trigonometric solution of the characteristic cubic (all
+/// roots are real for a symmetric matrix). No iteration, no external
+/// linear-algebra dependency.
+fn symmetric_eigenvalues_3x3(a: [[f64; 3]; 3]) -> [f64; 3] {
+    // Off-diagonal magnitude. When it vanishes the matrix is already
+    // diagonal and the eigenvalues are the diagonal entries.
+    let p1 = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
+    if p1 <= 0.0 {
+        let mut d = [a[0][0], a[1][1], a[2][2]];
+        d.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        return d;
+    }
+    let q = (a[0][0] + a[1][1] + a[2][2]) / 3.0;
+    let p2 = (a[0][0] - q).powi(2) + (a[1][1] - q).powi(2) + (a[2][2] - q).powi(2) + 2.0 * p1;
+    let p = (p2 / 6.0).sqrt();
+    // B = (1/p)(A − qI); r = det(B)/2, clamped to acos's domain.
+    let mut b = a;
+    for (i, row) in b.iter_mut().enumerate() {
+        row[i] -= q;
+    }
+    for row in &mut b {
+        for x in row {
+            *x /= p;
+        }
+    }
+    let det = b[0][0] * (b[1][1] * b[2][2] - b[1][2] * b[2][1])
+        - b[0][1] * (b[1][0] * b[2][2] - b[1][2] * b[2][0])
+        + b[0][2] * (b[1][0] * b[2][1] - b[1][1] * b[2][0]);
+    let r = (det / 2.0).clamp(-1.0, 1.0);
+    let phi = r.acos() / 3.0;
+    let eig_max = q + 2.0 * p * phi.cos();
+    let eig_min = q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos();
+    let eig_mid = 3.0 * q - eig_max - eig_min;
+    [eig_min, eig_mid, eig_max]
+}
+
+/// Compute the mass properties of the solid enclosed by `scene` — the
+/// inertia tensor about the centre of mass and its principal moments —
+/// without mutating it.
+///
+/// The rotational-inertia completion of the mass-property family:
+/// [`mesh_volume`] gives the mass, [`mesh_centroid`] the centre of mass,
+/// and this the inertia tensor. All are divergence-theorem integrals
+/// over the enclosed solid and are true mass-properties only for a
+/// **closed** surface (see [`MeshInertiaReport`] and [`mesh_volume`] for
+/// the watertightness precondition). Density is uniform and unit; scale
+/// the tensor by the caller's real density. Accumulated in `f64`;
+/// non-finite-corner facets are excluded (and flag
+/// [`MeshInertiaReport::had_non_finite`]) but still count toward
+/// `triangles_summed`. Non-`Triangles` primitives are skipped, matching
+/// the rest of this module.
+pub fn mesh_inertia(scene: &Scene3D) -> MeshInertiaReport {
+    let mut report = MeshInertiaReport::default();
+    for mesh in &scene.meshes {
+        for prim in &mesh.primitives {
+            if prim.topology != Topology::Triangles {
+                continue;
+            }
+            let face_count = match &prim.indices {
+                Some(idx) => idx.len() / 3,
+                None => prim.positions.len() / 3,
+            };
+            for face_idx in 0..face_count {
+                let (vi0, vi1, vi2) = resolve_face(&prim.indices, face_idx);
+                let v0 = match prim.positions.get(vi0) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v1 = match prim.positions.get(vi1) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let v2 = match prim.positions.get(vi2) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                report.triangles_summed += 1;
+                let a = [v0[0] as f64, v0[1] as f64, v0[2] as f64];
+                let b = [v1[0] as f64, v1[1] as f64, v1[2] as f64];
+                let c = [v2[0] as f64, v2[1] as f64, v2[2] as f64];
+                if !(a.iter().all(|x| x.is_finite())
+                    && b.iter().all(|x| x.is_finite())
+                    && c.iter().all(|x| x.is_finite()))
+                {
+                    report.had_non_finite = true;
+                    continue;
+                }
+                // Signed tetrahedron volume (origin, a, b, c).
+                let tet_cross = [
+                    b[1] * c[2] - b[2] * c[1],
+                    b[2] * c[0] - b[0] * c[2],
+                    b[0] * c[1] - b[1] * c[0],
+                ];
+                let vol = (a[0] * tet_cross[0] + a[1] * tet_cross[1] + a[2] * tet_cross[2]) / 6.0;
+                report.signed_volume += vol;
+
+                // First moment: tet-volume · tet-centroid, centroid =
+                // (0 + a + b + c) / 4.
+                let s = [a[0] + b[0] + c[0], a[1] + b[1] + c[1], a[2] + b[2] + c[2]];
+                report.first_moment[0] += vol * s[0] / 4.0;
+                report.first_moment[1] += vol * s[1] / 4.0;
+                report.first_moment[2] += vol * s[2] / 4.0;
+
+                // Second moments about the origin. For the tetrahedron
+                // (0, a, b, c) with signed volume `vol`, the barycentric
+                // moment identity gives
+                //   ∫ xᵢ xⱼ dV = vol/20 · (Sᵢ Sⱼ + aᵢaⱼ + bᵢbⱼ + cᵢcⱼ)
+                // where S = a + b + c (the origin vertex contributes 0).
+                let k = vol / 20.0;
+                let m = |i: usize, j: usize| {
+                    k * (s[i] * s[j] + a[i] * a[j] + b[i] * b[j] + c[i] * c[j])
+                };
+                report.second_moment[0] += m(0, 0); // xx
+                report.second_moment[1] += m(1, 1); // yy
+                report.second_moment[2] += m(2, 2); // zz
+                report.second_moment[3] += m(0, 1); // xy
+                report.second_moment[4] += m(0, 2); // xz
+                report.second_moment[5] += m(1, 2); // yz
+            }
+        }
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3840,6 +4088,40 @@ mod tests {
         let mut scene = Scene3D::new();
         scene.add_mesh(mesh);
         scene
+    }
+
+    #[test]
+    fn eigenvalues_of_diagonal_matrix_are_the_diagonal_sorted() {
+        // Exactly-diagonal matrix hits the `p1 == 0` short-circuit.
+        let a = [[3.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 2.0]];
+        let e = symmetric_eigenvalues_3x3(a);
+        assert_eq!(e, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn eigenvalues_recover_known_symmetric_spectrum() {
+        // Build A = Qᵀ diag(1,4,9) Q for a fixed rotation Q; the
+        // eigenvalues must come back as {1, 4, 9} regardless of the
+        // off-diagonal coupling the rotation introduces.
+        let (c, s) = (0.6f64, 0.8f64); // cos/sin of a rotation in the x-y plane
+                                       // A = R diag(1,4,9) Rᵀ with R rotating x-y by θ (cosθ=0.6).
+        let d = [1.0, 4.0, 9.0];
+        // R columns: (c, s, 0), (-s, c, 0), (0, 0, 1).
+        let r = [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]];
+        let mut a = [[0.0f64; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut sum = 0.0;
+                for k in 0..3 {
+                    sum += r[i][k] * d[k] * r[j][k];
+                }
+                a[i][j] = sum;
+            }
+        }
+        let e = symmetric_eigenvalues_3x3(a);
+        assert!((e[0] - 1.0).abs() < 1e-9, "e {e:?}");
+        assert!((e[1] - 4.0).abs() < 1e-9, "e {e:?}");
+        assert!((e[2] - 9.0).abs() < 1e-9, "e {e:?}");
     }
 
     fn unit_cube_soup_primitive() -> Primitive {

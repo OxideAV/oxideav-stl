@@ -821,6 +821,47 @@ in `f64`; a facet with a non-finite corner is excluded from both (and
 sets `had_non_finite`) while still counting toward `triangles_summed`.
 Non-`Triangles` primitives are skipped.
 
+### Inertia tensor + principal moments (`mesh_inertia`)
+
+`oxideav_stl::mesh_inertia(&scene)` completes the mass-property family:
+`mesh_volume` gives the mass, `mesh_centroid` the centre of mass, and
+this the **inertia tensor** of the enclosed solid. All three are
+divergence-theorem volume integrals decomposed into signed tetrahedra
+spanning the origin and each facet, so — like the enclosed volume — they
+are true mass-properties only for a **closed** surface. Density is
+uniform and unit (`ρ = 1`), so the reported mass equals the enclosed
+volume and the tensor scales linearly with the caller's real density:
+
+```rust
+use oxideav_stl::mesh_inertia;
+
+# let scene = oxideav_mesh3d::Scene3D::new();
+let r = mesh_inertia(&scene);
+if let Some(t) = r.inertia_tensor_about_centroid() {
+    println!("mass {}, Ixx {}", r.mass(), t[0][0]);
+}
+if let Some([i0, i1, i2]) = r.principal_moments() {
+    // ascending; the eigenvectors are the principal axes — the
+    // natural orientation to lay a part flat on the build plate.
+    println!("principal moments {i0} <= {i1} <= {i2}");
+}
+```
+
+`inertia_tensor_about_centroid()` returns the `3 × 3` symmetric tensor
+about the centre of mass (diagonal = moments of inertia `∫(y²+z²) dV`
+etc., off-diagonal = negated products of inertia), with the global
+winding orientation normalised away so an inside-out mesh still yields a
+positive-definite tensor. `principal_moments()` are its eigenvalues
+(closed-form trigonometric solution of the characteristic cubic — no
+iteration, no external linear-algebra dependency), sorted ascending.
+`center_of_mass()` equals `MeshCentroidReport::volume_centroid` and
+`mass()` is the absolute enclosed volume; all four helpers return `None`
+(resp. `0.0`) when the signed volume is zero or non-finite. Accumulated
+in `f64`; non-finite-corner facets are excluded (and flag
+`had_non_finite`) but still count toward `triangles_summed`. The oracle:
+a solid box of extents `(w, h, d)` reports `Ixx = m(h²+d²)/12`,
+`Iyy = m(w²+d²)/12`, `Izz = m(w²+h²)/12` with zero products of inertia.
+
 `repair_weld_vertices` only mutates `prim.positions` /
 `prim.normals` / `prim.indices` on `Triangles` primitives;
 `prim.extras`, `mesh.name`, and the scene-graph `nodes` / `roots`

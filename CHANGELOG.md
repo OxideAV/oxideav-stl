@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `topology::mesh_inertia` + `MeshInertiaReport` — the rotational-inertia
+  completion of the mass-property family (`mesh_volume` = mass,
+  `mesh_centroid` = centre of mass, `mesh_inertia` = inertia tensor).
+  Divergence-theorem volume integral over the enclosed solid (signed
+  tetrahedra to the origin, `f64`-accumulated). Helpers:
+  `inertia_tensor_about_centroid()` (`3 × 3` symmetric, winding-orientation
+  normalised so an inside-out mesh stays positive-definite),
+  `principal_moments()` (its eigenvalues via a closed-form trigonometric
+  solve of the characteristic cubic — no iteration, no external
+  linear-algebra dep), `center_of_mass()`, and `mass()`. True
+  mass-properties only for a closed surface (same watertightness
+  precondition as `mesh_volume`). Pinned by `tests/mesh_inertia.rs`
+  (5 tests, box closed-form oracle + inside-out + translation invariance)
+  and two eigenvalue unit tests.
+
 - `topology::repair_drop_duplicate_facets` + `DuplicateFacetDropReport`
   — new mutating repair that removes surplus copies of a repeated
   corner-triple (an exact repeat *or* a reversed-winding twin, keyed on
