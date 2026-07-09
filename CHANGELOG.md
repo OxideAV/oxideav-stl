@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-stl/compare/v0.0.4...v0.0.5) - 2026-07-09
+
+### Other
+
+- use Vec::clear over truncate(0) in a test (clippy 0.1.96)
+- add mesh_inertia to the geometry Criterion suite + driver
+- cover mesh_inertia + repair_drop_duplicate_facets in the repair target
+- mesh_inertia — inertia tensor + principal moments (mass-property family)
+- repair_drop_duplicate_facets — cull doubled surface patches
+- non_manifold_edge_examples — illustrative locators for over-shared edges
+- add CI / crates.io / docs.rs / MIT-license badges
+- geometry-diagnostic property invariants over the seeded sweep
+- geometry-diagnostics Criterion suite + profiling driver
+- surface Materialise COLOR=/MATERIAL= header defaults pre-decode
+- rule 8 — solid/endsolid name-mismatch strict-spec check
+- mesh_centroid — area- + volume-weighted centroid diagnostic
+- mesh_edge_length_stats — spec triangle-side / facet-size extents
+- deepen + re-minimise the encode corpus (r361)
+- fix OOB panic on dangling index buffer + add `encode` fuzz target (r361)
+- property round-trip suite + corpus deepening (r361)
+- Round 332 — topology::mesh_surface_area total surface-area diagnostic
+- Round 328 — topology::mesh_volume signed enclosed-volume diagnostic
+- repair_cap_boundary_loops — triangulate closed naked-edge holes
+- Round 317 — topology::boundary_loops naked-edge hole extraction
+- refresh to current status, drop per-round changelog cruft
+
 ### Fixed
 
 - **Encoder out-of-bounds panic on a dangling index buffer.** Both the
