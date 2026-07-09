@@ -6160,7 +6160,7 @@ mod tests {
         // exactly — so the next appended splitter slot (u16::MAX + 1
         // = 65536) sits one past the U16 boundary and forces the
         // auto-widening path.
-        prim.positions.truncate(0);
+        prim.positions.clear();
         prim.normals = Some(Vec::new());
         // 5 T-junction positions occupy slots u16::MAX-4 .. u16::MAX.
         // Slots 0..u16::MAX-4 are padded with sentinel positions far
