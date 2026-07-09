@@ -1572,13 +1572,14 @@ results are bit-stable across hosts and runs):
   `validate_t_junctions_on` at 100 / 300 / 1 000 (the opt-in
   brute-force T-junction sub-check) so the diagnostic-only
   warning on the T-junction rule is empirically substantiated.
-- `geometry` — the four non-mutating scalar-geometry diagnostics
+- `geometry` — the five non-mutating scalar-geometry diagnostics
   (`mesh_volume`, `mesh_surface_area`, `mesh_edge_length_stats`,
-  `mesh_centroid`) at 1 K / 10 K / 100 K triangles. Each is a single
-  `O(N)` `f64`-accumulated forward pass; the bench surfaces their
-  relative weight in one comparison (the per-edge `sqrt`×3 in
-  `mesh_edge_length_stats` is the heaviest, the dual area+volume moment
-  in `mesh_centroid` second).
+  `mesh_centroid`, `mesh_inertia`) at 1 K / 10 K / 100 K triangles. Each
+  is a single `O(N)` `f64`-accumulated forward pass; the bench surfaces
+  their relative weight in one comparison (the per-edge `sqrt`×3 in
+  `mesh_edge_length_stats` is the heaviest, then the full second-moment
+  tensor in `mesh_inertia`, then the dual area+volume moment in
+  `mesh_centroid`).
 
 Run with `cargo bench -p oxideav-stl --bench <name>` or `--quick
 --noplot` for a fast headline sweep. Indicative numbers
@@ -1591,6 +1592,7 @@ profile): binary decode ~7.6 GiB/s at 100 K triangles; ASCII decode
 diagnostic-only cost noted on that rule above). At 100 K triangles the
 scalar-geometry diagnostics run `mesh_volume` ~255 µs,
 `mesh_surface_area` ~274 µs, `mesh_centroid` ~546 µs (dual moment),
+`mesh_inertia` ~585 µs (second-moment tensor),
 `mesh_edge_length_stats` ~990 µs (per-edge `sqrt`×3).
 
 ## Profiling
@@ -1626,11 +1628,11 @@ The seven targets:
 - `profile_validate` (200 × 10 K triangles) — default-on rule set
   (facet orientation + unit normal + watertight/manifold +
   consistent winding).
-- `profile_geometry` (500 × 10 K triangles) — the four non-mutating
+- `profile_geometry` (500 × 10 K triangles) — the five non-mutating
   scalar-geometry diagnostics (`mesh_volume` + `mesh_surface_area` +
-  `mesh_edge_length_stats` + `mesh_centroid`) run in sequence so the
-  shared cross-product / triple-product / `sqrt` hot loops attribute
-  cycles in one flame graph.
+  `mesh_edge_length_stats` + `mesh_centroid` + `mesh_inertia`) run in
+  sequence so the shared cross-product / triple-product / second-moment /
+  `sqrt` hot loops attribute cycles in one flame graph.
 
 Shared fixture builders live in `examples/profile_common/mod.rs`
 and are pulled in by each driver via `#[path =

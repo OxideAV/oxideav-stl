@@ -1,11 +1,14 @@
-//! Long-running deterministic driver for the four non-mutating
+//! Long-running deterministic driver for the five non-mutating
 //! scalar-geometry diagnostics — `mesh_volume`, `mesh_surface_area`,
-//! `mesh_edge_length_stats`, and `mesh_centroid`. Each is a single
-//! `O(N)` forward pass with `f64` accumulation; running all four in
-//! sequence on a fixed fixture lets a profiler attribute cycles across
-//! the cross-product / triple-product / sqrt hot loops they share.
+//! `mesh_edge_length_stats`, `mesh_centroid`, and `mesh_inertia`. Each
+//! is a single `O(N)` forward pass with `f64` accumulation; running all
+//! five in sequence on a fixed fixture lets a profiler attribute cycles
+//! across the cross-product / triple-product / second-moment / sqrt hot
+//! loops they share.
 
-use oxideav_stl::{mesh_centroid, mesh_edge_length_stats, mesh_surface_area, mesh_volume};
+use oxideav_stl::{
+    mesh_centroid, mesh_edge_length_stats, mesh_inertia, mesh_surface_area, mesh_volume,
+};
 
 #[path = "profile_common/mod.rs"]
 mod profile_common;
@@ -21,6 +24,7 @@ fn main() {
         acc = acc.wrapping_add(mesh_surface_area(&scene).triangles_summed);
         acc = acc.wrapping_add(mesh_edge_length_stats(&scene).edges_summed);
         acc = acc.wrapping_add(mesh_centroid(&scene).triangles_summed);
+        acc = acc.wrapping_add(mesh_inertia(&scene).triangles_summed);
     }
     println!(
         "profile_geometry: iterations={ITERATIONS} triangles_per_iter={N_TRIS} accumulator={acc}"

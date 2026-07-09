@@ -1,20 +1,24 @@
 //! Criterion benchmarks for the non-mutating scalar-geometry
 //! diagnostics — `mesh_volume`, `mesh_surface_area`,
-//! `mesh_edge_length_stats`, and `mesh_centroid`.
+//! `mesh_edge_length_stats`, `mesh_centroid`, and `mesh_inertia`.
 //!
 //! Each is a single `O(N)` forward pass over the triangle soup with
 //! `f64` accumulation; this bench substantiates that cost at matched
-//! triangle counts so the relative weight of the four passes (the
-//! centroid does both the area and volume moment, so it is the
-//! heaviest) is visible in one comparison alongside the `validate`
-//! suite.
+//! triangle counts so the relative weight of the five passes is visible
+//! in one comparison alongside the `validate` suite. The
+//! `mesh_edge_length_stats` pass stays heaviest (three `sqrt`s per
+//! facet); `mesh_inertia` (the full second-moment tensor, no `sqrt`) is
+//! the heaviest of the remaining `sqrt`-free passes, just above the
+//! centroid's dual area+volume moment.
 //!
 //! Run with:
 //!     cargo bench -p oxideav-stl --bench geometry
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_stl::{mesh_centroid, mesh_edge_length_stats, mesh_surface_area, mesh_volume};
+use oxideav_stl::{
+    mesh_centroid, mesh_edge_length_stats, mesh_inertia, mesh_surface_area, mesh_volume,
+};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -54,11 +58,16 @@ fn bench_centroid(c: &mut Criterion) {
     bench_one(c, "mesh_centroid", mesh_centroid);
 }
 
+fn bench_inertia(c: &mut Criterion) {
+    bench_one(c, "mesh_inertia", mesh_inertia);
+}
+
 criterion_group!(
     benches,
     bench_volume,
     bench_surface_area,
     bench_edge_length_stats,
-    bench_centroid
+    bench_centroid,
+    bench_inertia
 );
 criterion_main!(benches);
