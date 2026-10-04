@@ -110,6 +110,7 @@ full encode pass. Useful for tooling that wants to report
 shared-index → STL expansion ratios:
 
 ```rust
+# let scene = oxideav_mesh3d::Scene3D::new();
 let s = oxideav_stl::StlEncoder::stats(&scene);
 println!("share factor = {:.2}", s.share_factor());
 ```
