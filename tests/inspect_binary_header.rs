@@ -5,7 +5,7 @@
 //! reported counts agree with the full-decode round-trip path on the
 //! same byte stream.
 
-use oxideav_stl::{inspect_binary_header, BinaryHeaderReport};
+use oxideav_stl::{BinaryHeaderReport, inspect_binary_header};
 
 /// Build a small binary STL with caller-supplied attribute pairs.
 fn synth(triangles: usize, attrs: &[(u8, u8)]) -> Vec<u8> {
@@ -51,7 +51,7 @@ fn inspector_round_trip_against_synthetic_vendor_style_stream() {
         .and_then(|v| v.as_str())
         .expect("non-zero attrs surface on decoded extras");
     let mut decoder_non_zero = 0usize;
-    for chunk in hex.as_bytes().chunks_exact(4) {
+    for chunk in hex.as_bytes().as_chunks::<4>().0 {
         let lo = u8::from_str_radix(std::str::from_utf8(&chunk[..2]).unwrap(), 16).unwrap();
         let hi = u8::from_str_radix(std::str::from_utf8(&chunk[2..]).unwrap(), 16).unwrap();
         if lo != 0 || hi != 0 {

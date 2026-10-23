@@ -8,8 +8,8 @@
 
 use oxideav_mesh3d::Mesh3DDecoder;
 use oxideav_stl::{
-    repair_split_t_junctions, validate, StlDecoder, ValidationOptions,
-    DEFAULT_T_JUNCTION_SPLIT_TOLERANCE, DEFAULT_T_JUNCTION_TOLERANCE,
+    DEFAULT_T_JUNCTION_SPLIT_TOLERANCE, DEFAULT_T_JUNCTION_TOLERANCE, StlDecoder,
+    ValidationOptions, repair_split_t_junctions, validate,
 };
 
 /// Classic T-junction: one big triangle's edge `(0,0,0) → (2,0,0)`

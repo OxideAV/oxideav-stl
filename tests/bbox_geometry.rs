@@ -5,7 +5,7 @@
 //! `Bbox::point` / `merge` / `expanded_by` composition tests.
 
 use oxideav_mesh3d::{Mesh, Mesh3DDecoder, Mesh3DEncoder, Primitive, Scene3D, Topology};
-use oxideav_stl::{bbox, bbox_of_mesh, bbox_of_primitive, Bbox, StlDecoder, StlEncoder};
+use oxideav_stl::{Bbox, StlDecoder, StlEncoder, bbox, bbox_of_mesh, bbox_of_primitive};
 
 /// Build a 2x3x4 ASCII STL "brick" — vertices at (0..2, 0..3, 0..4)
 /// via two triangles on one bottom face. The bbox of the encoded
@@ -366,7 +366,7 @@ fn corners_have_documented_canonical_order() {
     assert_eq!(c[5], [4.0, 2.0, 6.0]); // 101 — XZ high
     assert_eq!(c[6], [1.0, 5.0, 6.0]); // 110 — YZ high
     assert_eq!(c[7], [4.0, 5.0, 6.0]); // 111 — XYZ high
-                                       // The doc-comment's "opposite corners at i and 7-i" invariant.
+    // The doc-comment's "opposite corners at i and 7-i" invariant.
     for i in 0..8 {
         let lhs = c[i];
         let rhs = c[7 - i];

@@ -378,7 +378,7 @@ impl Walker<'_> {
             None => {
                 return Err(Error::InvalidData(format!(
                     "ASCII STL: expected `{kw}`, got end-of-file"
-                )))
+                )));
             }
         };
         if !tok.eq_ignore_ascii_case(kw) {
@@ -421,7 +421,7 @@ impl Walker<'_> {
             None => {
                 return Err(Error::InvalidData(
                     "ASCII STL: expected float, got end-of-file".into(),
-                ))
+                ));
             }
         };
         tok.parse::<f32>().map_err(|e| {

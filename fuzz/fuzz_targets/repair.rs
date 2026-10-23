@@ -35,13 +35,13 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_mesh3d::{Indices, Mesh, Node, Primitive, Scene3D, Topology};
 use oxideav_stl::{
-    bbox, bbox_of_mesh, bbox_of_primitive, boundary_loops, check_z_sorted, mesh_centroid,
-    mesh_edge_length_stats, mesh_inertia, mesh_surface_area, mesh_volume,
+    ValidationOptions, bbox, bbox_of_mesh, bbox_of_primitive, boundary_loops, check_z_sorted,
+    mesh_centroid, mesh_edge_length_stats, mesh_inertia, mesh_surface_area, mesh_volume,
     repair_cap_boundary_loops, repair_drop_degenerate_triangles, repair_drop_duplicate_facets,
     repair_make_winding_consistent, repair_normalize_unit_normals,
     repair_orient_normals_from_winding, repair_recompute_zero_normals, repair_sort_triangles_by_z,
     repair_split_t_junctions, repair_translate_to_positive_octant, repair_weld_vertices, shells,
-    validate, ValidationOptions,
+    validate,
 };
 
 /// A forward byte cursor over the fuzz buffer. Reads zero-pad past the

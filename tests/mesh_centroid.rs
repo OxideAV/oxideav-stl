@@ -9,7 +9,7 @@
 //! about placement).
 
 use oxideav_mesh3d::Mesh3DDecoder;
-use oxideav_stl::{mesh_centroid, StlDecoder};
+use oxideav_stl::{StlDecoder, mesh_centroid};
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
     out.extend_from_slice(&v[0].to_le_bytes());

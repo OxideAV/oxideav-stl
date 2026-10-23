@@ -4,7 +4,7 @@
 //! catches).
 
 use oxideav_mesh3d::{Indices, Mesh, Mesh3DDecoder, Mesh3DEncoder, Primitive, Scene3D, Topology};
-use oxideav_stl::{repair_drop_duplicate_facets, StlDecoder, StlEncoder};
+use oxideav_stl::{StlDecoder, StlEncoder, repair_drop_duplicate_facets};
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
     out.extend_from_slice(&v[0].to_le_bytes());

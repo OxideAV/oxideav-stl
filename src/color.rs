@@ -186,12 +186,12 @@ fn scale5to8(c5: u8) -> u8 {
 /// "no convention asserted" and either fall back to raw byte
 /// round-trip or surface a UI choice.
 pub fn detect(attribute_bytes: &[u8]) -> Option<ColorConvention> {
-    if attribute_bytes.len() < 2 || attribute_bytes.len() % 2 != 0 {
+    if attribute_bytes.len() < 2 || !attribute_bytes.len().is_multiple_of(2) {
         return None;
     }
     let mut nonzero = 0usize;
     let mut bit15_set = 0usize;
-    for chunk in attribute_bytes.chunks_exact(2) {
+    for chunk in attribute_bytes.as_chunks::<2>().0 {
         let slot = u16::from_le_bytes([chunk[0], chunk[1]]);
         if slot != 0 {
             nonzero += 1;

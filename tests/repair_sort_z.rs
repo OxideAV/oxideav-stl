@@ -8,7 +8,7 @@
 //! `Triangles` primitive's facets.
 
 use oxideav_mesh3d::{Mesh3DDecoder, Mesh3DEncoder};
-use oxideav_stl::{repair_sort_triangles_by_z, StlDecoder, StlEncoder};
+use oxideav_stl::{StlDecoder, StlEncoder, repair_sort_triangles_by_z};
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
     out.extend_from_slice(&v[0].to_le_bytes());

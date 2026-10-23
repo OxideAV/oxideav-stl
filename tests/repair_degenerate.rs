@@ -7,7 +7,7 @@
 //! intact.
 
 use oxideav_mesh3d::{Indices, Mesh3DDecoder, Mesh3DEncoder, Topology};
-use oxideav_stl::{repair_drop_degenerate_triangles, StlDecoder};
+use oxideav_stl::{StlDecoder, repair_drop_degenerate_triangles};
 
 /// Build a binary STL with two triangles laid out byte-for-byte; the
 /// second has three coincident corners and counts as degenerate.

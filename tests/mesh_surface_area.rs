@@ -9,7 +9,7 @@
 //! even for an open sheet, unlike the enclosed volume.
 
 use oxideav_mesh3d::Mesh3DDecoder;
-use oxideav_stl::{mesh_surface_area, StlDecoder};
+use oxideav_stl::{StlDecoder, mesh_surface_area};
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
     out.extend_from_slice(&v[0].to_le_bytes());

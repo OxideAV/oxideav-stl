@@ -7,8 +7,8 @@
 
 use oxideav_mesh3d::{Mesh3DDecoder, Mesh3DEncoder};
 use oxideav_stl::{
-    bbox, validate, Bbox, StlDecoder, StlEncoder, ValidationOptions, ValidationReport,
-    MAX_REPORTED_DEFECTS,
+    Bbox, MAX_REPORTED_DEFECTS, StlDecoder, StlEncoder, ValidationOptions, ValidationReport, bbox,
+    validate,
 };
 
 /// Build a binary STL byte stream for a closed unit cube — 12

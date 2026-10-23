@@ -17,7 +17,7 @@
 
 use oxideav_mesh3d::{Mesh3DDecoder, Mesh3DEncoder};
 use oxideav_stl::{
-    repair_make_winding_consistent, validate, StlDecoder, StlEncoder, ValidationOptions,
+    StlDecoder, StlEncoder, ValidationOptions, repair_make_winding_consistent, validate,
 };
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
@@ -43,7 +43,7 @@ fn build_binary_flipped_quad() -> Vec<u8> {
     let mut bytes = Vec::with_capacity(84 + 100);
     bytes.extend_from_slice(&[0u8; 80]); // header
     bytes.extend_from_slice(&2u32.to_le_bytes()); // triangle count
-                                                  // tri 0 — CCW around +Z. Walks diagonal (1,1,0) → (0,0,0).
+    // tri 0 — CCW around +Z. Walks diagonal (1,1,0) → (0,0,0).
     push_triangle(
         &mut bytes,
         [0.0, 0.0, 1.0],

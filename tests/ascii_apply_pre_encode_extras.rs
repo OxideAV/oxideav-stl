@@ -12,7 +12,7 @@ use oxideav_mesh3d::{
     Indices, Mesh, Mesh3DDecoder, Mesh3DEncoder, Node, Primitive, Scene3D, Topology,
 };
 use oxideav_stl::{
-    StlDecoder, StlEncoder, AUTO_INJECT_SHARE_FACTOR_THRESHOLD, UNIQUE_VERTEX_COUNT_EXTRAS_KEY,
+    AUTO_INJECT_SHARE_FACTOR_THRESHOLD, StlDecoder, StlEncoder, UNIQUE_VERTEX_COUNT_EXTRAS_KEY,
 };
 
 fn build_indexed_cube() -> Scene3D {
@@ -78,9 +78,11 @@ fn ascii_auto_inject_off_no_op_even_above_threshold() {
     let mut scene = build_indexed_cube();
     let enc = StlEncoder::new_ascii().with_auto_inject_unique_count(false);
     enc.apply_pre_encode_extras(&mut scene);
-    assert!(!scene.meshes[0].primitives[0]
-        .extras
-        .contains_key(UNIQUE_VERTEX_COUNT_EXTRAS_KEY));
+    assert!(
+        !scene.meshes[0].primitives[0]
+            .extras
+            .contains_key(UNIQUE_VERTEX_COUNT_EXTRAS_KEY)
+    );
 }
 
 #[test]
@@ -107,9 +109,11 @@ fn ascii_auto_inject_on_low_share_factor_no_op() {
     assert!((stats.share_factor() - 1.0).abs() < 1e-6);
     let enc = StlEncoder::new_ascii().with_auto_inject_unique_count(true);
     enc.apply_pre_encode_extras(&mut scene);
-    assert!(!scene.meshes[0].primitives[0]
-        .extras
-        .contains_key(UNIQUE_VERTEX_COUNT_EXTRAS_KEY));
+    assert!(
+        !scene.meshes[0].primitives[0]
+            .extras
+            .contains_key(UNIQUE_VERTEX_COUNT_EXTRAS_KEY)
+    );
 }
 
 #[test]
@@ -130,9 +134,11 @@ fn ascii_encode_pass_stays_pure_functional_on_immutable_scene() {
     let scene = build_indexed_cube();
     let mut enc = StlEncoder::new_ascii().with_auto_inject_unique_count(true);
     let _bytes = enc.encode(&scene).unwrap();
-    assert!(!scene.meshes[0].primitives[0]
-        .extras
-        .contains_key(UNIQUE_VERTEX_COUNT_EXTRAS_KEY));
+    assert!(
+        !scene.meshes[0].primitives[0]
+            .extras
+            .contains_key(UNIQUE_VERTEX_COUNT_EXTRAS_KEY)
+    );
 }
 
 #[test]

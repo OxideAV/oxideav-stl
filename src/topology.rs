@@ -148,11 +148,7 @@ impl Shell {
         // or otherwise pathological surface where this formula is
         // not meaningful.
         let num = 2 - chi;
-        if num % 2 == 0 {
-            Some(num / 2)
-        } else {
-            None
-        }
+        if num % 2 == 0 { Some(num / 2) } else { None }
     }
 }
 
@@ -791,12 +787,10 @@ fn compact_primitive_faces(prim: &mut Primitive, keep: &[bool], dropped: usize) 
                 new_pos.push(prim.positions[b]);
                 new_pos.push(prim.positions[b + 1]);
                 new_pos.push(prim.positions[b + 2]);
-                if normals_match {
-                    if let Some(ns) = prim.normals.as_ref() {
-                        new_norms.push(ns[b]);
-                        new_norms.push(ns[b + 1]);
-                        new_norms.push(ns[b + 2]);
-                    }
+                if normals_match && let Some(ns) = prim.normals.as_ref() {
+                    new_norms.push(ns[b]);
+                    new_norms.push(ns[b + 1]);
+                    new_norms.push(ns[b + 2]);
                 }
             }
             prim.positions = new_pos;
@@ -1527,7 +1521,11 @@ fn sort_by_z_in_primitive(prim: &mut Primitive, report: &mut SortByZReport) {
     });
 
     // Count how many faces actually moved (identity permutation ⇒ 0).
-    let reordered = order.iter().enumerate().filter(|(i, &o)| *i != o).count();
+    let reordered = order
+        .iter()
+        .enumerate()
+        .filter(|&(ref i, &o)| *i != o)
+        .count();
     if reordered == 0 {
         return;
     }
@@ -1568,12 +1566,10 @@ fn sort_by_z_in_primitive(prim: &mut Primitive, report: &mut SortByZReport) {
                 new_pos.push(prim.positions[b]);
                 new_pos.push(prim.positions[b + 1]);
                 new_pos.push(prim.positions[b + 2]);
-                if normals_match {
-                    if let Some(ns) = prim.normals.as_ref() {
-                        new_norms.push(ns[b]);
-                        new_norms.push(ns[b + 1]);
-                        new_norms.push(ns[b + 2]);
-                    }
+                if normals_match && let Some(ns) = prim.normals.as_ref() {
+                    new_norms.push(ns[b]);
+                    new_norms.push(ns[b + 1]);
+                    new_norms.push(ns[b + 2]);
                 }
             }
             prim.positions = new_pos;
@@ -2315,10 +2311,8 @@ fn make_winding_consistent_in_primitive(
             for &face_idx in &to_flip {
                 let b = face_idx * 3;
                 prim.positions.swap(b + 1, b + 2);
-                if normals_match {
-                    if let Some(ns) = prim.normals.as_mut() {
-                        ns.swap(b + 1, b + 2);
-                    }
+                if normals_match && let Some(ns) = prim.normals.as_mut() {
+                    ns.swap(b + 1, b + 2);
                 }
             }
         }
@@ -4104,7 +4098,7 @@ mod tests {
         // eigenvalues must come back as {1, 4, 9} regardless of the
         // off-diagonal coupling the rotation introduces.
         let (c, s) = (0.6f64, 0.8f64); // cos/sin of a rotation in the x-y plane
-                                       // A = R diag(1,4,9) Rᵀ with R rotating x-y by θ (cosθ=0.6).
+        // A = R diag(1,4,9) Rᵀ with R rotating x-y by θ (cosθ=0.6).
         let d = [1.0, 4.0, 9.0];
         // R columns: (c, s, 0), (-s, c, 0), (0, 0, 1).
         let r = [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]];

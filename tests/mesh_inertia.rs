@@ -8,7 +8,7 @@
 //! `I_zz = m(w²+h²)/12`, with zero products of inertia.
 
 use oxideav_mesh3d::Mesh3DDecoder;
-use oxideav_stl::{mesh_inertia, StlDecoder};
+use oxideav_stl::{StlDecoder, mesh_inertia};
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
     out.extend_from_slice(&v[0].to_le_bytes());

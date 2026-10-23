@@ -11,7 +11,7 @@
 
 use oxideav_mesh3d::Mesh3DDecoder;
 use oxideav_stl::{
-    boundary_loops, repair_cap_boundary_loops, validate, StlDecoder, ValidationOptions,
+    StlDecoder, ValidationOptions, boundary_loops, repair_cap_boundary_loops, validate,
 };
 
 /// A tetrahedron (A,B,C,D) missing its `(B,C,D)` face: three

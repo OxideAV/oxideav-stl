@@ -4,7 +4,7 @@
 //! callers see is what the topology API consumes.
 
 use oxideav_mesh3d::{Mesh3DDecoder, Mesh3DEncoder};
-use oxideav_stl::{repair_weld_vertices, shells, StlDecoder, StlEncoder};
+use oxideav_stl::{StlDecoder, StlEncoder, repair_weld_vertices, shells};
 
 /// Build a binary STL byte stream for a closed unit cube — 12
 /// triangles, 36 emitted vertices, every edge shared by exactly two

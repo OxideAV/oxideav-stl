@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use oxideav_mesh3d::{Mesh, Mesh3DDecoder, Mesh3DEncoder, Primitive, Scene3D, Topology};
-use oxideav_stl::{trace, StlDecoder, StlEncoder};
+use oxideav_stl::{StlDecoder, StlEncoder, trace};
 
 fn tmp_path(stem: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -266,8 +266,10 @@ fn no_trace_path_means_no_tape() {
     trace::set_thread_trace_path(None);
     // Ensure env var is also unset — set to empty so the open_from_env
     // returns None.
-    std::env::set_var("OXIDEAV_STL_TRACE_FILE", "");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("OXIDEAV_STL_TRACE_FILE", "") };
     let bytes = synth_minimal_binary();
     let _ = StlDecoder::new().decode(&bytes).unwrap();
-    std::env::remove_var("OXIDEAV_STL_TRACE_FILE");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("OXIDEAV_STL_TRACE_FILE") };
 }

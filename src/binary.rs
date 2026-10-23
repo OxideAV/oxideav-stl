@@ -106,14 +106,9 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     let body = &bytes[HEADER_BYTES..HEADER_BYTES + body_len];
     #[cfg(feature = "trace")]
     let mut tri_index: usize = 0;
-    for chunk in body.chunks_exact(TRIANGLE_BYTES) {
-        // `chunks_exact` yields slices known to be exactly
-        // `TRIANGLE_BYTES` long; the `try_into` turns that into an
-        // `&[u8; 50]` so `unpack_triangle_record` can index without
-        // bounds checks.
-        let record: &[u8; TRIANGLE_BYTES] = chunk
-            .try_into()
-            .expect("chunks_exact yields TRIANGLE_BYTES");
+    // `as_chunks` yields `&[u8; TRIANGLE_BYTES]` records directly, so
+    // `unpack_triangle_record` can index without bounds checks.
+    for record in body.as_chunks::<TRIANGLE_BYTES>().0 {
         let (n, v0, v1, v2, attr_lo, attr_hi) = unpack_triangle_record(record);
         if attr_lo != 0 || attr_hi != 0 {
             any_nonzero_attr = true;
@@ -205,11 +200,11 @@ pub fn decode(bytes: &[u8]) -> Result<Scene3D> {
     if !mesh_extras.is_empty() {
         // Mesh::extras isn't present on the type — we lift onto the
         // primitive's extras instead so the round-trip key has a home.
-        if let Some(m) = scene.meshes.get_mut(mesh_id.0 as usize) {
-            if let Some(p) = m.primitives.first_mut() {
-                for (k, v) in mesh_extras {
-                    p.extras.insert(k, v);
-                }
+        if let Some(m) = scene.meshes.get_mut(mesh_id.0 as usize)
+            && let Some(p) = m.primitives.first_mut()
+        {
+            for (k, v) in mesh_extras {
+                p.extras.insert(k, v);
             }
         }
     }
@@ -518,12 +513,12 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, &'static str> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("odd-length hex string");
     }
     let mut out = Vec::with_capacity(s.len() / 2);
     let bytes = s.as_bytes();
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         let hi = nib(chunk[0])?;
         let lo = nib(chunk[1])?;
         out.push((hi << 4) | lo);

@@ -14,8 +14,8 @@
 
 use oxideav_mesh3d::{Mesh3DDecoder, Mesh3DEncoder};
 use oxideav_stl::{
-    repair_translate_to_positive_octant, validate, StlDecoder, StlEncoder, ValidationOptions,
-    DEFAULT_POSITIVE_OCTANT_MARGIN,
+    DEFAULT_POSITIVE_OCTANT_MARGIN, StlDecoder, StlEncoder, ValidationOptions,
+    repair_translate_to_positive_octant, validate,
 };
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {

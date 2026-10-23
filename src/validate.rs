@@ -1083,30 +1083,30 @@ pub fn validate(scene: &Scene3D, opts: &ValidationOptions) -> ValidationReport {
                     .filter(|ns| ns.len() == prim.positions.len())
                     .map(|ns| ns[vi0]);
 
-                if opts.check_facet_orientation {
-                    if let Some(stored) = stored_normal {
-                        let recomputed = recompute_normal(v0, v1, v2);
-                        if !normals_within(stored, recomputed, opts.normal_tolerance) {
-                            rep.facet_orientation_defects += 1;
-                            push_capped(&mut rep.facet_orientation_examples, loc);
-                        }
+                if opts.check_facet_orientation
+                    && let Some(stored) = stored_normal
+                {
+                    let recomputed = recompute_normal(v0, v1, v2);
+                    if !normals_within(stored, recomputed, opts.normal_tolerance) {
+                        rep.facet_orientation_defects += 1;
+                        push_capped(&mut rep.facet_orientation_examples, loc);
                     }
                 }
-                if opts.check_unit_normal {
-                    if let Some(stored) = stored_normal {
-                        let len =
-                            (stored[0] * stored[0] + stored[1] * stored[1] + stored[2] * stored[2])
-                                .sqrt();
-                        // Allow zero-length normals (the spec'd
-                        // sentinel for "consumer should recompute
-                        // from winding") to pass — they're a known
-                        // convention, not a defect. Anything else
-                        // outside [1 - eps, 1 + eps] is a defect.
-                        let is_zero_normal = len.abs() < opts.unit_normal_tolerance;
-                        if !is_zero_normal && (len - 1.0).abs() > opts.unit_normal_tolerance {
-                            rep.non_unit_normal_defects += 1;
-                            push_capped(&mut rep.non_unit_normal_examples, loc);
-                        }
+                if opts.check_unit_normal
+                    && let Some(stored) = stored_normal
+                {
+                    let len =
+                        (stored[0] * stored[0] + stored[1] * stored[1] + stored[2] * stored[2])
+                            .sqrt();
+                    // Allow zero-length normals (the spec'd
+                    // sentinel for "consumer should recompute
+                    // from winding") to pass — they're a known
+                    // convention, not a defect. Anything else
+                    // outside [1 - eps, 1 + eps] is a defect.
+                    let is_zero_normal = len.abs() < opts.unit_normal_tolerance;
+                    if !is_zero_normal && (len - 1.0).abs() > opts.unit_normal_tolerance {
+                        rep.non_unit_normal_defects += 1;
+                        push_capped(&mut rep.non_unit_normal_examples, loc);
                     }
                 }
 

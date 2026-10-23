@@ -10,7 +10,7 @@
 
 use oxideav_mesh3d::{Mesh3DDecoder, Mesh3DEncoder};
 use oxideav_stl::{
-    repair_orient_normals_from_winding, validate, StlDecoder, StlEncoder, ValidationOptions,
+    StlDecoder, StlEncoder, ValidationOptions, repair_orient_normals_from_winding, validate,
 };
 
 /// Build a binary STL with one +Z-winding triangle whose stored normal

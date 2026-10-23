@@ -86,12 +86,11 @@ pub(crate) fn is_ascii_stl(bytes: &[u8]) -> bool {
             // Use checked arithmetic — `n * 50` could overflow on a
             // pathological count. If overflow occurs, fall through to
             // ASCII (the binary parser will reject it anyway).
-            if let Some(body) = n.checked_mul(crate::binary::TRIANGLE_BYTES) {
-                if let Some(total) = body.checked_add(crate::binary::HEADER_BYTES) {
-                    if bytes.len() == total {
-                        return false;
-                    }
-                }
+            if let Some(body) = n.checked_mul(crate::binary::TRIANGLE_BYTES)
+                && let Some(total) = body.checked_add(crate::binary::HEADER_BYTES)
+                && bytes.len() == total
+            {
+                return false;
             }
         }
     }

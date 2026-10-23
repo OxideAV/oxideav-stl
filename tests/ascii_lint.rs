@@ -4,8 +4,8 @@
 
 use oxideav_mesh3d::{Mesh, Mesh3DEncoder, Primitive, Scene3D, Topology};
 use oxideav_stl::{
-    lint_ascii, repair_translate_to_positive_octant, StlEncoder, DEFAULT_POSITIVE_OCTANT_MARGIN,
-    MAX_REPORTED_LINT_FINDINGS,
+    DEFAULT_POSITIVE_OCTANT_MARGIN, MAX_REPORTED_LINT_FINDINGS, StlEncoder, lint_ascii,
+    repair_translate_to_positive_octant,
 };
 
 const STRICT: &str = "solid part\n  facet normal 0 0 1\n    outer loop\n      vertex 0.5 0.5 1\n      vertex 1.5 0.5 1\n      vertex 0.5 1.5 1\n    endloop\n  endfacet\nendsolid part\n";

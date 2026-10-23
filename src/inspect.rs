@@ -323,7 +323,7 @@ mod tests {
             .expect("non-zero attrs should surface on decoded extras");
         // Each 4 hex chars = 2 bytes = one triangle's attribute slot.
         let mut decoder_non_zero = 0usize;
-        for chunk in hex.as_bytes().chunks_exact(4) {
+        for chunk in hex.as_bytes().as_chunks::<4>().0 {
             let lo = u8::from_str_radix(std::str::from_utf8(&chunk[..2]).unwrap(), 16).unwrap();
             let hi = u8::from_str_radix(std::str::from_utf8(&chunk[2..]).unwrap(), 16).unwrap();
             if lo != 0 || hi != 0 {

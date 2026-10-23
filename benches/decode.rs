@@ -10,7 +10,7 @@
 //! Run with:
 //!     cargo bench -p oxideav-stl --bench decode
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use oxideav_mesh3d::Mesh3DDecoder;
 use oxideav_stl::StlDecoder;

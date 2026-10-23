@@ -8,7 +8,7 @@
 
 use oxideav_mesh3d::{Mesh3DDecoder, Mesh3DEncoder};
 use oxideav_stl::{
-    repair_recompute_zero_normals, validate, StlDecoder, StlEncoder, ValidationOptions,
+    StlDecoder, StlEncoder, ValidationOptions, repair_recompute_zero_normals, validate,
 };
 
 /// Build a binary STL with one +Z-facing triangle whose stored normal

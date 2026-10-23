@@ -20,7 +20,7 @@
 //! Run with:
 //!     cargo bench -p oxideav-stl --bench dedup
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use oxideav_stl::{EncodeStats, StlEncoder};
 

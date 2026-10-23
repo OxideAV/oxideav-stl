@@ -8,7 +8,7 @@
 //! companions) straight from the geometry.
 
 use oxideav_mesh3d::Mesh3DDecoder;
-use oxideav_stl::{mesh_edge_length_stats, StlDecoder};
+use oxideav_stl::{StlDecoder, mesh_edge_length_stats};
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
     out.extend_from_slice(&v[0].to_le_bytes());

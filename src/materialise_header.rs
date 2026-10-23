@@ -86,10 +86,10 @@ pub(crate) fn parse_header(header: &[u8]) -> (Option<[u8; COLOR_LEN]>, Option<[u
             if let Some(triple) = parse_uint_run::<COLOR_LEN>(rest) {
                 color = Some(triple);
             }
-        } else if let Some(rest) = strip_prefix(line, b"MATERIAL=") {
-            if let Some(quart) = parse_uint_run::<MATERIAL_LEN>(rest) {
-                material = Some(quart);
-            }
+        } else if let Some(rest) = strip_prefix(line, b"MATERIAL=")
+            && let Some(quart) = parse_uint_run::<MATERIAL_LEN>(rest)
+        {
+            material = Some(quart);
         }
     }
 
@@ -210,11 +210,7 @@ fn parse_uint_run<const N: usize>(rest: &[u8]) -> Option<[u8; N]> {
         out[i] = tok.parse::<u16>().ok().filter(|v| *v <= 255)? as u8;
         i += 1;
     }
-    if i == N {
-        Some(out)
-    } else {
-        None
-    }
+    if i == N { Some(out) } else { None }
 }
 
 /// Inverse of [`parse_uint_run`] — emits space-separated decimal

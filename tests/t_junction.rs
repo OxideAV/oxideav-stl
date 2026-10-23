@@ -9,7 +9,7 @@
 
 use oxideav_mesh3d::Mesh3DDecoder;
 use oxideav_stl::{
-    validate, StlDecoder, ValidationOptions, DEFAULT_T_JUNCTION_TOLERANCE, MAX_REPORTED_DEFECTS,
+    DEFAULT_T_JUNCTION_TOLERANCE, MAX_REPORTED_DEFECTS, StlDecoder, ValidationOptions, validate,
 };
 
 /// Build an ASCII STL where the bottom edge of one triangle is split

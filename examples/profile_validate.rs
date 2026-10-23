@@ -6,7 +6,7 @@
 //! flipping `ValidationOptions::check_t_junctions` if a separate
 //! T-junction flamegraph is needed.
 
-use oxideav_stl::{validate, ValidationOptions};
+use oxideav_stl::{ValidationOptions, validate};
 
 #[path = "profile_common/mod.rs"]
 mod profile_common;

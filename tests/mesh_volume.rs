@@ -10,7 +10,7 @@
 
 use oxideav_mesh3d::Mesh3DDecoder;
 use oxideav_stl::{
-    mesh_volume, repair_make_winding_consistent, repair_orient_normals_from_winding, StlDecoder,
+    StlDecoder, mesh_volume, repair_make_winding_consistent, repair_orient_normals_from_winding,
 };
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {

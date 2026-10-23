@@ -9,7 +9,7 @@
 //! for the re-sort.
 
 use oxideav_mesh3d::Mesh3DDecoder;
-use oxideav_stl::{check_z_sorted, repair_sort_triangles_by_z, StlDecoder};
+use oxideav_stl::{StlDecoder, check_z_sorted, repair_sort_triangles_by_z};
 
 fn push_vec3(out: &mut Vec<u8>, v: [f32; 3]) {
     out.extend_from_slice(&v[0].to_le_bytes());
