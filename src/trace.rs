@@ -125,6 +125,7 @@ impl Format {
 
 /// One JSONL event — exactly one JSON object on its own line.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Event<'a> {
     Header {
         format: Format,

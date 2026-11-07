@@ -184,17 +184,15 @@ fn build_scene(data: &[u8]) -> Scene3D {
 /// All rules on, including the two opt-in brute-force sub-checks, so
 /// the T-junction and positive-octant scanners are exercised too.
 fn all_rules() -> ValidationOptions {
-    ValidationOptions {
-        check_positive_octant: true,
-        check_facet_orientation: true,
-        check_unit_normal: true,
-        check_watertight: true,
-        check_t_junctions: true,
-        check_consistent_winding: true,
-        check_degenerate_triangles: true,
-        check_zero_area_triangles: true,
-        ..ValidationOptions::default()
-    }
+    ValidationOptions::default()
+        .with_check_positive_octant(true)
+        .with_check_facet_orientation(true)
+        .with_check_unit_normal(true)
+        .with_check_watertight(true)
+        .with_check_t_junctions(true)
+        .with_check_consistent_winding(true)
+        .with_check_degenerate_triangles(true)
+        .with_check_zero_area_triangles(true)
 }
 
 fuzz_target!(|data: &[u8]| {

@@ -38,10 +38,7 @@ fn bench_validate_default(c: &mut Criterion) {
 
 fn bench_validate_t_junctions(c: &mut Criterion) {
     let mut group = c.benchmark_group("validate_t_junctions_on");
-    let opts = ValidationOptions {
-        check_t_junctions: true,
-        ..ValidationOptions::default()
-    };
+    let opts = ValidationOptions::default().with_check_t_junctions(true);
     // Brute-force O(E · V_unique). Cap at 1 K triangles = ~3 K edges
     // × ~3 K unique vertices = ~9 M predicate evaluations per call,
     // which already pushes a single sample into the multi-millisecond

@@ -89,6 +89,7 @@ use oxideav_mesh3d::{Indices, Primitive, Scene3D, Topology};
 /// first visited by the BFS; consumers can re-walk the original
 /// `Scene3D` via those locators to extract per-shell geometry.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Shell {
     /// Triangle locators (mesh / primitive / face) that belong to
     /// this shell, in BFS discovery order.
@@ -109,6 +110,27 @@ pub struct Shell {
     /// Number of unique edges in this shell that appear in three or
     /// more triangles (non-manifold within the shell).
     pub non_manifold_edges: usize,
+}
+
+impl Shell {
+    /// Build `Shell` from every field, in declaration order.
+    pub fn new(
+        face_indices: Vec<FaceLocator>,
+        vertices: usize,
+        edges: usize,
+        faces: usize,
+        boundary_edges: usize,
+        non_manifold_edges: usize,
+    ) -> Self {
+        Self {
+            face_indices,
+            vertices,
+            edges,
+            faces,
+            boundary_edges,
+            non_manifold_edges,
+        }
+    }
 }
 
 impl Shell {
@@ -156,6 +178,7 @@ impl Shell {
 /// [`crate::validate::FaceLocator`] but lives in this module so
 /// `topology` is usable standalone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct FaceLocator {
     /// Index into [`Scene3D::meshes`].
     pub mesh: usize,
@@ -164,6 +187,17 @@ pub struct FaceLocator {
     /// Index of the triangle within the primitive (0-based,
     /// post-index-buffer resolution).
     pub face: usize,
+}
+
+impl FaceLocator {
+    /// Build `FaceLocator` from every field, in declaration order.
+    pub fn new(mesh: usize, primitive: usize, face: usize) -> Self {
+        Self {
+            mesh,
+            primitive,
+            face,
+        }
+    }
 }
 
 /// Walk `scene` and return one [`Shell`] per connected component,
@@ -291,6 +325,7 @@ pub fn shells(scene: &Scene3D) -> Vec<Shell> {
 /// broken, this report localises the breakage as discrete holes
 /// rather than an undifferentiated edge count.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct BoundaryLoop {
     /// Ordered vertex positions tracing the loop. For a closed loop the
     /// first vertex is **not** repeated at the end; the implied final
@@ -305,6 +340,13 @@ pub struct BoundaryLoop {
     /// not be walked into a single cycle and was emitted as an open
     /// chain so no edge is silently dropped.
     pub closed: bool,
+}
+
+impl BoundaryLoop {
+    /// Build `BoundaryLoop` from every field, in declaration order.
+    pub fn new(vertices: Vec<[f32; 3]>, closed: bool) -> Self {
+        Self { vertices, closed }
+    }
 }
 
 impl BoundaryLoop {
@@ -454,6 +496,7 @@ fn key_to_pos(k: VertKey) -> [f32; 3] {
 /// primitive because STL's flat triangle list emits `face_count *
 /// 3` vertex slots regardless of upstream sharing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WeldReport {
     /// Triangles inspected.
     pub triangles_inspected: usize,
@@ -626,6 +669,7 @@ fn resolve_face(indices: &Option<Indices>, face_idx: usize) -> (usize, usize, us
 /// scene. A run that finds nothing to drop produces
 /// `dropped_triangles == 0` — the canonical idempotency signal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DegenerateDropReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive.
@@ -806,6 +850,7 @@ fn compact_primitive_faces(prim: &mut Primitive, keep: &[bool], dropped: usize) 
 /// Counters are summed across every `Triangles` primitive in the
 /// scene. `dropped_triangles == 0` is the idempotency signal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DuplicateFacetDropReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive.
@@ -920,6 +965,7 @@ fn vert_key_eq(a: [f32; 3], b: [f32; 3]) -> bool {
 /// Counters are summed across every `Triangles` primitive in the
 /// scene. `recomputed_triangles == 0` is the idempotency signal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NormalRecomputeReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive.
@@ -1108,6 +1154,7 @@ fn recompute_face_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3], eps: f32) -> Opt
 /// scene whose every facet already has its stored normal aligned
 /// with its winding is left untouched.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OrientReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive.
@@ -1264,6 +1311,7 @@ fn orient_normals_in_primitive(prim: &mut Primitive, eps: f32, report: &mut Orie
 /// Counters are summed across every `Triangles` primitive in the
 /// scene. `rescaled_normals == 0` is the idempotency signal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NormalizeReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive.
@@ -1411,6 +1459,7 @@ fn normalize_normals_in_primitive(
 /// second pass over an already-sorted scene leaves every triangle in
 /// place and reports zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SortByZReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive.
@@ -1597,6 +1646,7 @@ fn sort_by_z_in_primitive(prim: &mut Primitive, report: &mut SortByZReport) {
 /// needs the yes/no answer (one linear scan, no permutation, no buffer
 /// rewrite, no allocation).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ZSortReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every `Triangles` primitive in the scene.
@@ -1730,6 +1780,7 @@ pub const DEFAULT_POSITIVE_OCTANT_MARGIN: f32 = 1.0e-6;
 /// `triangles_inspected` is summed across every `Triangles` primitive
 /// in the scene, mirroring the other repairs in this module.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct TranslateOctantReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive. A scene with no `Triangles`
@@ -1980,6 +2031,7 @@ pub fn repair_translate_to_positive_octant(
 /// scene whose every manifold edge is already walked in opposite
 /// directions by its two incident triangles is left untouched.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WindingConsistencyReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive.
@@ -2345,6 +2397,7 @@ pub const DEFAULT_T_JUNCTION_SPLIT_TOLERANCE: f32 = 1.0e-5;
 /// with no T-junctions (under the configured tolerance) is left
 /// untouched.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TJunctionSplitReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive, on entry.
@@ -2817,6 +2870,7 @@ fn collect_triangles(scene: &Scene3D) -> Vec<CollectedTri> {
 /// [`Self::signed_volume`] as an enclosed volume; this report does not
 /// itself decide watertightness.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct MeshVolumeReport {
     /// Number of triangle facets summed across every `Triangles`
     /// primitive in the scene (post-index-buffer resolution).
@@ -2936,6 +2990,7 @@ pub fn mesh_volume(scene: &Scene3D) -> MeshVolumeReport {
 /// mesh to be closed (area is meaningful even for an open sheet, where
 /// the enclosed volume is not).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct MeshSurfaceAreaReport {
     /// Number of triangle facets summed across every `Triangles`
     /// primitive in the scene (post-index-buffer resolution).
@@ -3111,6 +3166,7 @@ fn point_strictly_on_segment_t(p: [f32; 3], q: [f32; 3], v: [f32; 3], eps: f32) 
 /// closed boundary loops (already watertight, or whose only naked
 /// edges form non-manifold open chains) is left untouched.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CapBoundaryLoopsReport {
     /// Total triangle slots inspected (post-index-buffer resolution)
     /// across every touched primitive, on entry.
@@ -3428,6 +3484,7 @@ fn cap_boundary_loops_in_primitive(prim: &mut Primitive, report: &mut CapBoundar
 /// excluded from the min/max/mean running values, so the reported
 /// extrema stay trustworthy even on a partly-corrupt scene.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct EdgeLengthStatsReport {
     /// Number of triangle facets walked across every `Triangles`
     /// primitive in the scene (post-index-buffer resolution).
@@ -3665,6 +3722,7 @@ pub fn mesh_edge_length_stats(scene: &Scene3D) -> EdgeLengthStatsReport {
 /// [`Self::had_non_finite`] and is excluded from both accumulations,
 /// while still counting toward [`Self::triangles_summed`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct MeshCentroidReport {
     /// Number of triangle facets walked across every `Triangles`
     /// primitive in the scene (post-index-buffer resolution).
@@ -3835,6 +3893,7 @@ pub fn mesh_centroid(scene: &Scene3D) -> MeshCentroidReport {
 /// while still counting toward [`Self::triangles_summed`].
 /// Non-`Triangles` primitives are skipped.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct MeshInertiaReport {
     /// Number of triangle facets walked across every `Triangles`
     /// primitive in the scene (post-index-buffer resolution).

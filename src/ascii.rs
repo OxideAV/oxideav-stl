@@ -259,6 +259,7 @@ pub fn encode(scene: &Scene3D) -> Result<Vec<u8>> {
 /// guidance; non-conformant parsers that reject `E+nnn` should not be
 /// asked to read this output.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AsciiNumberFormat {
     /// Rust's round-trip-safe `{}` formatter. Default.
     #[default]
@@ -293,6 +294,7 @@ pub enum AsciiNumberFormat {
 /// - `number_format != RoundTrip` → `number_format` wins, ignoring
 ///   `float_precision`.
 #[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
 pub struct EncodeOptions {
     /// Number of decimal digits after the point. `None` =
     /// round-trip-safe `{}`. `Some(n)` = `{:.n}`. Composes with
@@ -302,6 +304,15 @@ pub struct EncodeOptions {
     /// between the round-trip, fixed-decimal, and spec-style
     /// scientific output forms. Defaults to round-trip.
     pub number_format: AsciiNumberFormat,
+}
+
+impl EncodeOptions {
+    /// Set `number_format`.
+    #[must_use]
+    pub fn with_number_format(mut self, number_format: AsciiNumberFormat) -> Self {
+        self.number_format = number_format;
+        self
+    }
 }
 
 impl EncodeOptions {

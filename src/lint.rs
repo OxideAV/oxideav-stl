@@ -77,6 +77,7 @@ pub const MAX_REPORTED_LINT_FINDINGS: usize = 32;
 /// One illustrative lint finding: the 1-based source line plus the
 /// offending token as written in the file.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct AsciiLintFinding {
     /// 1-based line number of the offending token.
     pub line: usize,
@@ -84,11 +85,19 @@ pub struct AsciiLintFinding {
     pub token: String,
 }
 
+impl AsciiLintFinding {
+    /// Build `AsciiLintFinding` from every field, in declaration order.
+    pub fn new(line: usize, token: String) -> Self {
+        Self { line, token }
+    }
+}
+
 /// Outcome of a [`lint_ascii`] call.
 ///
 /// Every counter is complete (never capped); the `_examples` lists
 /// are capped at [`MAX_REPORTED_LINT_FINDINGS`] entries each.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct AsciiLintReport {
     /// Number of `solid … endsolid` blocks walked. Always `>= 1` on
     /// a successful lint (zero blocks is a parse error, exactly as in

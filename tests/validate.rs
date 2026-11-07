@@ -191,13 +191,11 @@ fn validate_off_path_skips_each_rule_independently() {
     let scene = StlDecoder::new().decode(&bytes).unwrap();
 
     // All checks off → completely empty report (counts zero, examples empty).
-    let opts = ValidationOptions {
-        check_facet_orientation: false,
-        check_unit_normal: false,
-        check_positive_octant: false,
-        check_watertight: false,
-        ..ValidationOptions::default()
-    };
+    let opts = ValidationOptions::default()
+        .with_check_facet_orientation(false)
+        .with_check_unit_normal(false)
+        .with_check_positive_octant(false)
+        .with_check_watertight(false);
     let r = validate(&scene, &opts);
     assert_eq!(r.facet_orientation_defects, 0);
     assert_eq!(r.non_unit_normal_defects, 0);
@@ -223,10 +221,7 @@ fn cube_passes_positive_octant_when_strictly_inside() {
             }
         }
     }
-    let opts = ValidationOptions {
-        check_positive_octant: true,
-        ..ValidationOptions::default()
-    };
+    let opts = ValidationOptions::default().with_check_positive_octant(true);
     let r = validate(&scene, &opts);
     assert_eq!(r.positive_octant_defects, 0, "report: {r:?}");
     let bb = bbox(&scene).unwrap();
@@ -240,10 +235,7 @@ fn cube_at_origin_fails_positive_octant_under_spec() {
     // fails the "nonnegative AND nonzero" rule.
     let bytes = unit_cube_binary_bytes();
     let scene = StlDecoder::new().decode(&bytes).unwrap();
-    let opts = ValidationOptions {
-        check_positive_octant: true,
-        ..ValidationOptions::default()
-    };
+    let opts = ValidationOptions::default().with_check_positive_octant(true);
     let r = validate(&scene, &opts);
     // Every triangle has at least one vertex on an axis plane.
     assert_eq!(r.positive_octant_defects, 12);
@@ -316,10 +308,7 @@ fn ascii_flipped_neighbour_flagged_as_inconsistent_winding() {
     assert!(!r.is_clean());
 
     // Turning the check off clears the winding fields.
-    let opts_off = ValidationOptions {
-        check_consistent_winding: false,
-        ..ValidationOptions::default()
-    };
+    let opts_off = ValidationOptions::default().with_check_consistent_winding(false);
     let r_off = validate(&scene, &opts_off);
     assert_eq!(r_off.inconsistent_winding_edges, 0);
     assert!(r_off.inconsistent_winding_examples.is_empty());
@@ -409,10 +398,7 @@ fn degenerate_check_off_silences_rule() {
         endfacet\n\
         endsolid degen\n";
     let scene = StlDecoder::new().decode(s.as_bytes()).unwrap();
-    let opts = ValidationOptions {
-        check_degenerate_triangles: false,
-        ..ValidationOptions::default()
-    };
+    let opts = ValidationOptions::default().with_check_degenerate_triangles(false);
     let r = validate(&scene, &opts);
     assert_eq!(r.degenerate_triangle_defects, 0);
     assert!(r.degenerate_triangle_examples.is_empty());

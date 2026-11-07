@@ -55,6 +55,7 @@
 /// Which 16-bit per-face colour convention is encoded in the
 /// `attribute_byte_count` slot of a binary STL triangle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ColorConvention {
     /// VisCAM / SolidView: `[valid:1][R:5][G:5][B:5]`. `valid=1` →
     /// per-face triple is live.

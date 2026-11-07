@@ -75,16 +75,11 @@ fn t_junction_opt_in_flags_split_edge() {
     let scene = StlDecoder::new()
         .decode(t_junction_ascii().as_bytes())
         .unwrap();
-    let opts = ValidationOptions {
-        check_t_junctions: true,
-        // Disable the other rules so the report carries just the
-        // T-junction signal — the bottom triangles are open meshes
-        // by design.
-        check_facet_orientation: false,
-        check_unit_normal: false,
-        check_watertight: false,
-        ..ValidationOptions::default()
-    };
+    let opts = ValidationOptions::default()
+        .with_check_t_junctions(true)
+        .with_check_facet_orientation(false)
+        .with_check_unit_normal(false)
+        .with_check_watertight(false);
     let r = validate(&scene, &opts);
     // The (1, 0, 0) midpoint sits on the top triangle's edge; both
     // bottom triangles own that corner, so both are flagged.
@@ -124,13 +119,11 @@ fn t_junction_clean_two_triangle_strip_is_clean() {
         endfacet\n\
         endsolid strip\n";
     let scene = StlDecoder::new().decode(s.as_bytes()).unwrap();
-    let opts = ValidationOptions {
-        check_t_junctions: true,
-        check_facet_orientation: false,
-        check_unit_normal: false,
-        check_watertight: false,
-        ..ValidationOptions::default()
-    };
+    let opts = ValidationOptions::default()
+        .with_check_t_junctions(true)
+        .with_check_facet_orientation(false)
+        .with_check_unit_normal(false)
+        .with_check_watertight(false);
     let r = validate(&scene, &opts);
     assert_eq!(r.t_junction_defects, 0, "report: {r:?}");
 }
@@ -181,13 +174,11 @@ fn t_junction_example_list_respects_max_cap() {
     }
     out.push_str("endsolid many\n");
     let scene = StlDecoder::new().decode(out.as_bytes()).unwrap();
-    let opts = ValidationOptions {
-        check_t_junctions: true,
-        check_facet_orientation: false,
-        check_unit_normal: false,
-        check_watertight: false,
-        ..ValidationOptions::default()
-    };
+    let opts = ValidationOptions::default()
+        .with_check_t_junctions(true)
+        .with_check_facet_orientation(false)
+        .with_check_unit_normal(false)
+        .with_check_watertight(false);
     let r = validate(&scene, &opts);
     // 99 interior midpoints sit on the roof's bottom edge (the (0,0)
     // and (100,0) endpoints are not midpoints). Each midpoint is

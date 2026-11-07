@@ -45,10 +45,7 @@ fn translate_octant_after_binary_decode_shifts_into_positive() {
     let mut scene = StlDecoder::new().decode(&bytes).expect("decode ok");
 
     // Pre-condition: validate-with-positive-octant-on flags the facet.
-    let opts = ValidationOptions {
-        check_positive_octant: true,
-        ..Default::default()
-    };
+    let opts = ValidationOptions::default().with_check_positive_octant(true);
     let pre = validate(&scene, &opts);
     assert!(
         pre.positive_octant_defects >= 1,
@@ -94,10 +91,7 @@ fn translate_octant_round_trips_through_binary_encoder() {
     assert!(p0[2] > 0.0, "z = {} should be > 0", p0[2]);
 
     // And the validate-rule should still report zero defects.
-    let opts = ValidationOptions {
-        check_positive_octant: true,
-        ..Default::default()
-    };
+    let opts = ValidationOptions::default().with_check_positive_octant(true);
     let rep = validate(&scene2, &opts);
     assert_eq!(rep.positive_octant_defects, 0);
 }

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `with_<field>` setters on `ValidationOptions` and the remaining field of `AsciiEncodeOptions` (`ascii::EncodeOptions`); `new(..)` (every field, in declaration order) on `BinaryHeaderReport`, `AsciiLintFinding`, `topology::Shell`, `topology::FaceLocator`, `topology::BoundaryLoop` and `validate::FaceLocator`. The other reports already derive `Default`.
+
+### Changed
+
+- `#[non_exhaustive]` on the enums `AsciiNumberFormat`, `ColorConvention` and `trace::Event`. `StlFormat` and `trace::Format` (ASCII / binary) stay exhaustive.
+- `#[non_exhaustive]` on the option and report records `AsciiLintFinding`, `AsciiLintReport`, `BinaryHeaderReport`, `BoundaryLoop`, `CapBoundaryLoopsReport`, `DegenerateDropReport`, `DuplicateFacetDropReport`, `EdgeLengthStatsReport`, `EncodeOptions`, `EncodeStats`, `FaceLocator`, `MeshCentroidReport`, `MeshInertiaReport`, `MeshSurfaceAreaReport`, `MeshVolumeReport`, `NormalRecomputeReport`, `NormalizeReport`, `OrientReport`, `Shell`, `SortByZReport`, `TJunctionSplitReport`, `TranslateOctantReport`, `ValidationOptions`, `ValidationReport`, `WeldReport`, `WindingConsistencyReport`, `ZSortReport`. The value types `Stl16BitColor` and `Bbox` stay as they are.
+
 ### Changed
 
 - edition 2024, MSRV 1.95

@@ -639,6 +639,7 @@ fn accumulate_primitive(prim: &oxideav_mesh3d::Primitive, acc: &mut BboxAccumula
 /// triangle's index within that primitive's effective vertex stream
 /// (post-index-buffer resolution, matching the encoder's emit order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct FaceLocator {
     /// Index into [`Scene3D::meshes`].
     pub mesh: usize,
@@ -648,8 +649,20 @@ pub struct FaceLocator {
     pub face: usize,
 }
 
+impl FaceLocator {
+    /// Build `FaceLocator` from every field, in declaration order.
+    pub fn new(mesh: usize, primitive: usize, face: usize) -> Self {
+        Self {
+            mesh,
+            primitive,
+            face,
+        }
+    }
+}
+
 /// Tunable knobs for [`validate`].
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct ValidationOptions {
     /// Component-wise tolerance for "stored normal matches recomputed
     /// face normal". Default [`DEFAULT_NORMAL_TOLERANCE`].
@@ -737,6 +750,92 @@ pub struct ValidationOptions {
     pub zero_area_tolerance: f32,
 }
 
+impl ValidationOptions {
+    /// Set `normal_tolerance`.
+    #[must_use]
+    pub fn with_normal_tolerance(mut self, normal_tolerance: f32) -> Self {
+        self.normal_tolerance = normal_tolerance;
+        self
+    }
+
+    /// Set `unit_normal_tolerance`.
+    #[must_use]
+    pub fn with_unit_normal_tolerance(mut self, unit_normal_tolerance: f32) -> Self {
+        self.unit_normal_tolerance = unit_normal_tolerance;
+        self
+    }
+
+    /// Set `check_positive_octant`.
+    #[must_use]
+    pub fn with_check_positive_octant(mut self, check_positive_octant: bool) -> Self {
+        self.check_positive_octant = check_positive_octant;
+        self
+    }
+
+    /// Set `check_facet_orientation`.
+    #[must_use]
+    pub fn with_check_facet_orientation(mut self, check_facet_orientation: bool) -> Self {
+        self.check_facet_orientation = check_facet_orientation;
+        self
+    }
+
+    /// Set `check_unit_normal`.
+    #[must_use]
+    pub fn with_check_unit_normal(mut self, check_unit_normal: bool) -> Self {
+        self.check_unit_normal = check_unit_normal;
+        self
+    }
+
+    /// Set `check_watertight`.
+    #[must_use]
+    pub fn with_check_watertight(mut self, check_watertight: bool) -> Self {
+        self.check_watertight = check_watertight;
+        self
+    }
+
+    /// Set `check_t_junctions`.
+    #[must_use]
+    pub fn with_check_t_junctions(mut self, check_t_junctions: bool) -> Self {
+        self.check_t_junctions = check_t_junctions;
+        self
+    }
+
+    /// Set `t_junction_tolerance`.
+    #[must_use]
+    pub fn with_t_junction_tolerance(mut self, t_junction_tolerance: f32) -> Self {
+        self.t_junction_tolerance = t_junction_tolerance;
+        self
+    }
+
+    /// Set `check_consistent_winding`.
+    #[must_use]
+    pub fn with_check_consistent_winding(mut self, check_consistent_winding: bool) -> Self {
+        self.check_consistent_winding = check_consistent_winding;
+        self
+    }
+
+    /// Set `check_degenerate_triangles`.
+    #[must_use]
+    pub fn with_check_degenerate_triangles(mut self, check_degenerate_triangles: bool) -> Self {
+        self.check_degenerate_triangles = check_degenerate_triangles;
+        self
+    }
+
+    /// Set `check_zero_area_triangles`.
+    #[must_use]
+    pub fn with_check_zero_area_triangles(mut self, check_zero_area_triangles: bool) -> Self {
+        self.check_zero_area_triangles = check_zero_area_triangles;
+        self
+    }
+
+    /// Set `zero_area_tolerance`.
+    #[must_use]
+    pub fn with_zero_area_tolerance(mut self, zero_area_tolerance: f32) -> Self {
+        self.zero_area_tolerance = zero_area_tolerance;
+        self
+    }
+}
+
 impl Default for ValidationOptions {
     fn default() -> Self {
         Self {
@@ -764,6 +863,7 @@ impl Default for ValidationOptions {
 /// surfaces. A `triangles_total` of 0 is a legitimate result for an
 /// empty scene; every rule's count + examples will be empty too.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct ValidationReport {
     /// Total triangle count walked.
     pub triangles_total: usize,

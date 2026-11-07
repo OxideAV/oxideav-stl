@@ -68,15 +68,9 @@ fn winding_consistency_after_binary_decode_flips_flipped_neighbour() {
     let mut scene = StlDecoder::new().decode(&bytes).expect("decode ok");
 
     // Pre-condition: validate flags one inconsistent edge.
-    let opts = ValidationOptions {
-        // Per-facet orientation depends on the stored normal vs winding.
-        // We're using a +Z normal which matches tri 0 but mismatches the
-        // flipped tri 1 — disable that rule to isolate the mesh-wide
-        // winding check.
-        check_facet_orientation: false,
-        check_unit_normal: false,
-        ..Default::default()
-    };
+    let opts = ValidationOptions::default()
+        .with_check_facet_orientation(false)
+        .with_check_unit_normal(false);
     let pre = validate(&scene, &opts);
     assert_eq!(
         pre.inconsistent_winding_edges, 1,
@@ -106,11 +100,9 @@ fn winding_consistency_round_trips_through_binary_encoder() {
     // Re-encode + re-decode + re-validate.
     let out = StlEncoder::new_binary().encode(&scene).expect("encode ok");
     let scene2 = StlDecoder::new().decode(&out).expect("decode ok");
-    let opts = ValidationOptions {
-        check_facet_orientation: false,
-        check_unit_normal: false,
-        ..Default::default()
-    };
+    let opts = ValidationOptions::default()
+        .with_check_facet_orientation(false)
+        .with_check_unit_normal(false);
     let r = validate(&scene2, &opts);
     assert_eq!(r.inconsistent_winding_edges, 0, "report: {r:?}");
 }

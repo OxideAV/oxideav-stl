@@ -44,14 +44,12 @@ fn t_junction_ascii() -> &'static str {
 }
 
 fn opts_for_tjunction_only() -> ValidationOptions {
-    ValidationOptions {
-        check_t_junctions: true,
-        check_facet_orientation: false,
-        check_unit_normal: false,
-        check_watertight: false,
-        check_consistent_winding: false,
-        ..ValidationOptions::default()
-    }
+    ValidationOptions::default()
+        .with_check_t_junctions(true)
+        .with_check_facet_orientation(false)
+        .with_check_unit_normal(false)
+        .with_check_watertight(false)
+        .with_check_consistent_winding(false)
 }
 
 #[test]

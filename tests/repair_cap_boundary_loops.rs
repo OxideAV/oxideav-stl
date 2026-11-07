@@ -47,13 +47,11 @@ fn open_tetra_ascii() -> &'static str {
 }
 
 fn opts_watertight_only() -> ValidationOptions {
-    ValidationOptions {
-        check_watertight: true,
-        check_facet_orientation: false,
-        check_unit_normal: false,
-        check_consistent_winding: false,
-        ..ValidationOptions::default()
-    }
+    ValidationOptions::default()
+        .with_check_watertight(true)
+        .with_check_facet_orientation(false)
+        .with_check_unit_normal(false)
+        .with_check_consistent_winding(false)
 }
 
 #[test]

@@ -35,6 +35,7 @@ use crate::binary::{HEADER_BYTES, TRIANGLE_BYTES};
 /// stream; the struct is `Copy` so the caller can stash it in a log
 /// or scoreboard without juggling lifetimes.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct BinaryHeaderReport {
     /// `triangle_count` field at offset 80 (little-endian `u32`).
     pub triangle_count: u32,
@@ -82,6 +83,36 @@ pub struct BinaryHeaderReport {
     /// same value the decode path surfaces on
     /// `Primitive::extras["stl:default_material"]`.
     pub materialise_default_material: Option<[u8; 12]>,
+}
+
+impl BinaryHeaderReport {
+    /// Build `BinaryHeaderReport` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        triangle_count: u32,
+        expected_byte_length: Option<usize>,
+        actual_byte_length: usize,
+        length_matches_exactly: bool,
+        non_zero_attribute_count: usize,
+        non_zero_attribute_fraction: f32,
+        spec_compliant_attributes: bool,
+        triangles_walked: usize,
+        materialise_default_color: Option<[u8; 4]>,
+        materialise_default_material: Option<[u8; 12]>,
+    ) -> Self {
+        Self {
+            triangle_count,
+            expected_byte_length,
+            actual_byte_length,
+            length_matches_exactly,
+            non_zero_attribute_count,
+            non_zero_attribute_fraction,
+            spec_compliant_attributes,
+            triangles_walked,
+            materialise_default_color,
+            materialise_default_material,
+        }
+    }
 }
 
 impl BinaryHeaderReport {

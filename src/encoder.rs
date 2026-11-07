@@ -26,6 +26,7 @@ use crate::{ascii, binary};
 /// shared vertex `share_factor` × times) without forcing a full
 /// encode pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EncodeStats {
     /// Total triangle count summed across every `Triangles` primitive
     /// in the scene (after applying any present index buffer).
